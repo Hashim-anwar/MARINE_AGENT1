@@ -1,14 +1,5 @@
 """
-MarineWise AI - AI agents and web research.
-
-This file handles:
-- Groq AI
-- Gemini AI
-- Tavily web search
-- Troubleshooting agent
-- Technical training agent
-- Training web research
-- Professional PPT slide planning
+MarineWise AI - AI agents, Tavily research, and presentation planning.
 
 No CrewAI or LiteLLM is used.
 """
@@ -29,40 +20,29 @@ import requests
 # ============================================================
 
 GROQ_MODEL = "openai/gpt-oss-120b"
-
-# Gemini model can be changed later without changing the app.
 GEMINI_MODEL = "gemini-3.8-flash"
 
 TAVILY_URL = "https://api.tavily.com/search"
 
-
-# Troubleshooting is intentionally kept small because
-# troubleshooting questions often contain large manual excerpts.
 TROUBLESHOOTING_MAX_PROMPT_CHARS = 6500
 TROUBLESHOOTING_MAX_COMPLETION = 700
 
-# Training needs more context than troubleshooting.
 TRAINING_MAX_PROMPT_CHARS = 18000
 TRAINING_MAX_COMPLETION = 1400
 
-# Web-search answer generation.
 WEB_MAX_PROMPT_CHARS = 7000
 WEB_MAX_COMPLETION = 900
 
-# Presentation planning needs enough room to create
-# a complete structured slide plan.
 PRESENTATION_PLAN_MAX_PROMPT_CHARS = 22000
 PRESENTATION_PLAN_MAX_COMPLETION = 3000
 
 
 # ============================================================
-# SIMPLE AGENT DEFINITIONS
+# AGENTS
 # ============================================================
 
 @dataclass
 class MarineAgent:
-    """Simple description of a MarineWise AI agent."""
-
     name: str
     role: str
     goal: str
@@ -72,8 +52,8 @@ TROUBLESHOOTING_AGENT = MarineAgent(
     name="Marine Troubleshooting Agent",
     role="Marine engine troubleshooting technician assistant",
     goal=(
-        "Help technicians diagnose marine engine alarms and defects using "
-        "the supplied manuals first and clearly identify the source."
+        "Help technicians diagnose marine engine alarms and defects "
+        "using supplied manuals first."
     ),
 )
 
@@ -81,109 +61,163 @@ TRAINING_AGENT = MarineAgent(
     name="Marine Technical Training Agent",
     role="Marine engine technical instructor",
     goal=(
-        "Create accurate, practical and visually understandable technical "
-        "training material for marine engineers and technicians."
+        "Create accurate, practical and visually understandable "
+        "technical training material."
     ),
 )
 
 
 def make_troubleshooting_agent() -> MarineAgent:
-    """Return the troubleshooting agent definition."""
     return TROUBLESHOOTING_AGENT
 
 
 def make_training_agent() -> MarineAgent:
-    """Return the training agent definition."""
     return TRAINING_AGENT
 
 
 # ============================================================
-# API KEY HELPERS
+# SAFE TEXT HELPERS
 # ============================================================
 
-def _get_key(provider: str, api_key: str | None = None) -> str:
+def _to_text(value: Any) -> str:
     """
-    Return an API key.
+    Safely convert anything into text.
 
-    The Streamlit app normally passes the key from st.secrets.
-    Environment variables are also supported.
+    This fixes the "'dict' object has no attribute 'strip'"
+    problem by never calling .strip() directly on unknown data.
     """
+
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, dict):
+        # Useful for research dictionaries.
+        parts = []
+
+        for key, item in value.items():
+            if item is None:
+                continue
+
+            if isinstance(item, (dict, list)):
+                item = json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    default=str,
+                )
+
+            parts.append(
+                f"{key}: {item}"
+            )
+
+        return "\n".join(parts).strip()
+
+    if isinstance(value, list):
+        parts = []
+
+        for item in value:
+            text = _to_text(item)
+
+            if text:
+                parts.append(text)
+
+        return "\n".join(parts).strip()
+
+    return str(value).strip()
+
+
+def _clean_text(value: Any) -> str:
+    """Normalize whitespace safely."""
+
+    text = _to_text(value)
+
+    text = text.replace("\x00", " ")
+
+    return re.sub(
+        r"\s+",
+        " ",
+        text,
+    ).strip()
+
+
+def _bounded(value: Any, limit: int) -> str:
+    """Convert to text and safely limit its size."""
+
+    text = _to_text(value)
+
+    if len(text) <= limit:
+        return text
+
+    return (
+        text[:limit].rstrip()
+        + "\n\n[Context truncated for safety.]"
+    )
+
+
+# ============================================================
+# API KEYS
+# ============================================================
+
+def _get_key(
+    provider: str,
+    api_key: str | None = None,
+) -> str:
 
     if api_key:
-        return api_key.strip()
+        return _to_text(api_key)
 
-    provider = provider.strip().lower()
+    provider = _clean_text(provider).lower()
 
     if provider == "groq":
         key = os.getenv("GROQ_API_KEY")
+
     elif provider == "gemini":
         key = os.getenv("GEMINI_API_KEY")
+
     else:
         key = None
 
     if not key:
         raise RuntimeError(
-            f"No API key was supplied for {provider.title()}. "
-            f"Configure the appropriate API key in Streamlit Secrets."
+            f"No API key configured for {provider.title()}."
         )
 
-    return key.strip()
+    return _to_text(key)
 
 
-def _get_tavily_key(api_key: str | None = None) -> str:
-    """Get Tavily API key."""
+def _get_tavily_key(
+    api_key: str | None = None,
+) -> str:
 
     if api_key:
-        return api_key.strip()
+        return _to_text(api_key)
 
     key = os.getenv("TAVILY_API_KEY")
 
     if not key:
         raise RuntimeError(
-            "TAVILY_API_KEY is not configured. "
-            "Add it to Streamlit Secrets."
+            "TAVILY_API_KEY is not configured."
         )
 
-    return key.strip()
+    return _to_text(key)
 
 
 # ============================================================
-# TEXT / CONTEXT HELPERS
+# LIMITS
 # ============================================================
 
-def _bounded(text: str | None, limit: int) -> str:
-    """
-    Keep prompts below provider context limits.
+def _limits(
+    agent_kind: str,
+) -> tuple[int, int]:
 
-    This is especially important for retrieved PDF chunks.
-    """
-
-    if not text:
-        return ""
-
-    text = str(text)
-
-    if len(text) <= limit:
-        return text
-
-    return text[:limit].rstrip() + "\n\n[Context truncated for safety.]"
-
-
-def _limits(agent_kind: str) -> tuple[int, int]:
-    """Return prompt and completion limits."""
-
-    kind = (agent_kind or "").strip().lower()
+    kind = _clean_text(agent_kind).lower()
 
     if kind == "troubleshooting":
         return (
             TROUBLESHOOTING_MAX_PROMPT_CHARS,
             TROUBLESHOOTING_MAX_COMPLETION,
-        )
-
-    if kind == "training":
-        return (
-            TRAINING_MAX_PROMPT_CHARS,
-            TRAINING_MAX_COMPLETION,
         )
 
     if kind == "presentation":
@@ -204,12 +238,6 @@ def _limits(agent_kind: str) -> tuple[int, int]:
     )
 
 
-def _clean_text(text: str) -> str:
-    """Clean excessive whitespace."""
-
-    return re.sub(r"\n{3,}", "\n\n", text or "").strip()
-
-
 # ============================================================
 # GROQ
 # ============================================================
@@ -220,27 +248,23 @@ def _run_groq(
     api_key: str,
     max_tokens: int,
 ) -> str:
-    """
-    Run Groq directly.
-
-    Important:
-    We intentionally do NOT use CrewAI or LiteLLM.
-    """
 
     from groq import Groq
 
-    client = Groq(api_key=api_key)
+    client = Groq(
+        api_key=_to_text(api_key)
+    )
 
     response = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[
             {
                 "role": "system",
-                "content": system_prompt,
+                "content": _to_text(system_prompt),
             },
             {
                 "role": "user",
-                "content": user_prompt,
+                "content": _to_text(user_prompt),
             },
         ],
         temperature=0.2,
@@ -249,16 +273,22 @@ def _run_groq(
     )
 
     if not response.choices:
-        raise RuntimeError("Groq returned no response.")
+        raise RuntimeError(
+            "Groq returned no response."
+        )
 
-    message = response.choices[0].message
-
-    content = getattr(message, "content", None)
+    content = getattr(
+        response.choices[0].message,
+        "content",
+        None,
+    )
 
     if not content:
-        raise RuntimeError("Groq returned an empty response.")
+        raise RuntimeError(
+            "Groq returned an empty response."
+        )
 
-    return str(content).strip()
+    return _to_text(content)
 
 
 # ============================================================
@@ -271,39 +301,46 @@ def _run_gemini(
     api_key: str,
     max_tokens: int,
 ) -> str:
-    """Run Gemini using the official google-genai SDK."""
 
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=_to_text(api_key)
+    )
 
-    combined_prompt = (
+    prompt = (
         "SYSTEM INSTRUCTIONS:\n"
-        f"{system_prompt}\n\n"
+        f"{_to_text(system_prompt)}\n\n"
         "USER REQUEST:\n"
-        f"{user_prompt}"
+        f"{_to_text(user_prompt)}"
     )
 
     response = client.models.generate_content(
         model=GEMINI_MODEL,
-        contents=combined_prompt,
+        contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0.2,
             max_output_tokens=max_tokens,
         ),
     )
 
-    text = getattr(response, "text", None)
+    text = getattr(
+        response,
+        "text",
+        None,
+    )
 
     if not text:
-        raise RuntimeError("Gemini returned an empty response.")
+        raise RuntimeError(
+            "Gemini returned an empty response."
+        )
 
-    return str(text).strip()
+    return _to_text(text)
 
 
 # ============================================================
-# GENERIC MARINE AGENT
+# MAIN AGENT RUNNER
 # ============================================================
 
 def run_marine_agent(
@@ -313,27 +350,38 @@ def run_marine_agent(
     user_prompt: str,
     api_key: str,
 ) -> str:
-    """
-    Run a MarineWise AI agent using Groq or Gemini.
 
-    Parameters match the current app.py.
-    """
+    provider = _clean_text(provider).lower()
 
-    provider = (provider or "Groq").strip().lower()
+    prompt_limit, completion_limit = _limits(
+        agent_kind
+    )
 
-    prompt_limit, completion_limit = _limits(agent_kind)
+    safe_system = _bounded(
+        system_prompt,
+        5000,
+    )
 
-    safe_system = _bounded(system_prompt, 5000)
+    remaining = max(
+        1000,
+        prompt_limit - len(safe_system),
+    )
 
-    remaining = max(1000, prompt_limit - len(safe_system))
+    safe_user = _bounded(
+        user_prompt,
+        remaining,
+    )
 
-    safe_user = _bounded(user_prompt, remaining)
+    key = _get_key(
+        provider,
+        api_key,
+    )
 
     if provider == "groq":
         return _run_groq(
             safe_system,
             safe_user,
-            _get_key("groq", api_key),
+            key,
             completion_limit,
         )
 
@@ -341,13 +389,12 @@ def run_marine_agent(
         return _run_gemini(
             safe_system,
             safe_user,
-            _get_key("gemini", api_key),
+            key,
             completion_limit,
         )
 
     raise ValueError(
-        f"Unsupported AI provider: {provider}. "
-        "Choose Groq or Gemini."
+        f"Unsupported AI provider: {provider}"
     )
 
 
@@ -356,32 +403,23 @@ def run_marine_agent(
 # ============================================================
 
 def _tavily_search(
-    query: str,
+    query: Any,
     api_key: str,
     max_results: int = 5,
     include_images: bool = False,
 ) -> dict[str, Any]:
-    """
-    Search Tavily.
 
-    Returns:
-        {
-            "results": [...],
-            "images": [...]
-        }
-    """
+    query_text = _clean_text(query)
 
-    query = _clean_text(query)
-
-    if not query:
+    if not query_text:
         return {
             "results": [],
             "images": [],
         }
 
     payload = {
-        "api_key": api_key,
-        "query": query,
+        "api_key": _to_text(api_key),
+        "query": query_text,
         "search_depth": "advanced",
         "max_results": max_results,
         "include_answer": False,
@@ -399,59 +437,53 @@ def _tavily_search(
 
     data = response.json()
 
-    results = data.get("results") or []
-    images = data.get("images") or []
+    clean_results = []
 
-    clean_results: list[dict[str, Any]] = []
+    for item in data.get("results", []):
 
-    for item in results:
         if not isinstance(item, dict):
-            continue
-
-        title = str(item.get("title") or "").strip()
-        url = str(item.get("url") or "").strip()
-        content = str(
-            item.get("content")
-            or item.get("snippet")
-            or ""
-        ).strip()
-
-        if not title and not url and not content:
             continue
 
         clean_results.append(
             {
-                "title": title,
-                "url": url,
-                "content": _bounded(content, 1800),
+                "title": _to_text(
+                    item.get("title")
+                ),
+                "url": _to_text(
+                    item.get("url")
+                ),
+                "content": _bounded(
+                    item.get("content")
+                    or item.get("snippet"),
+                    1800,
+                ),
             }
         )
 
-    clean_images: list[str] = []
+    clean_images = []
 
-    for image in images:
+    for image in data.get("images", []):
+
         if isinstance(image, str):
-            image_url = image.strip()
-
-            if image_url:
-                clean_images.append(image_url)
+            url = image.strip()
 
         elif isinstance(image, dict):
-            image_url = str(
+            url = _to_text(
                 image.get("url")
                 or image.get("image_url")
-                or ""
-            ).strip()
+            )
 
-            if image_url:
-                clean_images.append(image_url)
+        else:
+            url = ""
 
-    # Remove duplicate images while keeping order.
-    clean_images = list(dict.fromkeys(clean_images))
+        if url:
+            clean_images.append(url)
 
     return {
         "results": clean_results,
-        "images": clean_images,
+        "images": list(
+            dict.fromkeys(clean_images)
+        ),
     }
 
 
@@ -465,12 +497,6 @@ def run_web_search(
     user_prompt: str,
     api_key: str,
 ) -> str:
-    """
-    Search Tavily and then summarize the findings with Groq/Gemini.
-
-    This function is used by the Troubleshooting page when the
-    technician explicitly asks to search online.
-    """
 
     tavily_key = _get_tavily_key()
 
@@ -481,42 +507,45 @@ def run_web_search(
         include_images=False,
     )
 
-    results = research.get("results", [])
+    results = research.get(
+        "results",
+        [],
+    )
 
     if not results:
         return (
             "No reliable web search results were returned. "
-            "Please verify the engine model and search again."
+            "Please verify the engine model and try again."
         )
 
-    evidence_parts: list[str] = []
+    evidence = []
 
-    for i, result in enumerate(results, start=1):
-        evidence_parts.append(
-            f"SOURCE {i}\n"
-            f"Title: {result.get('title', '')}\n"
-            f"URL: {result.get('url', '')}\n"
-            f"Content: {result.get('content', '')}"
+    for number, result in enumerate(
+        results,
+        start=1,
+    ):
+
+        evidence.append(
+            f"SOURCE {number}\n"
+            f"Title: {_to_text(result.get('title'))}\n"
+            f"URL: {_to_text(result.get('url'))}\n"
+            f"Content: {_to_text(result.get('content'))}"
         )
 
-    evidence = "\n\n".join(evidence_parts)
-
-    combined_user_prompt = (
-        f"{user_prompt}\n\n"
+    prompt = (
+        f"{_to_text(user_prompt)}\n\n"
         "WEB SEARCH EVIDENCE:\n"
         f"{_bounded(evidence, WEB_MAX_PROMPT_CHARS)}\n\n"
-        "Answer using the evidence above. "
+        "Use the evidence above. "
         "Do not invent specifications. "
-        "Clearly distinguish information found online from information "
-        "contained in the supplied manuals. "
-        "Include source URLs where useful."
+        "Clearly state that the information comes from the web."
     )
 
     return run_marine_agent(
         provider,
         "web",
         system_prompt,
-        combined_user_prompt,
+        prompt,
         api_key,
     )
 
@@ -533,94 +562,53 @@ def run_training_web_research(
     manual_context: str = "",
     tavily_api_key: str | None = None,
 ) -> dict[str, Any]:
-    """
-    Perform deeper online research for professional training material.
-
-    The manual remains the primary source.
-
-    Tavily is used to find:
-    - technical explanations
-    - diagrams
-    - component information
-    - maintenance information
-    - safety information
-    - useful images
-
-    Returns a research bundle containing:
-        results
-        images
-        queries
-    """
-
-    del provider  # Provider is retained for API compatibility.
 
     engine = _clean_text(engine)
     topic = _clean_text(topic)
     ship = _clean_text(ship)
-    manual_context = _clean_text(manual_context)
+    manual_context = _to_text(manual_context)
 
-    tavily_key = _get_tavily_key(tavily_api_key)
+    tavily_key = _get_tavily_key(
+        tavily_api_key
+    )
 
-    queries: list[str] = []
-
-    # --------------------------------------------------------
-    # Query 1 - Main subject
-    # --------------------------------------------------------
+    queries = []
 
     if engine:
         queries.append(
             f"{engine} {topic} marine engine technical information"
         )
-    else:
-        queries.append(
-            f"marine diesel engine {topic} technical information"
-        )
-
-    # --------------------------------------------------------
-    # Query 2 - Diagram / system
-    # --------------------------------------------------------
-
-    if engine:
         queries.append(
             f"{engine} {topic} system diagram schematic"
         )
     else:
         queries.append(
+            f"marine diesel engine {topic} technical information"
+        )
+        queries.append(
             f"marine diesel {topic} system diagram schematic"
         )
-
-    # --------------------------------------------------------
-    # Query 3 - Training material
-    # --------------------------------------------------------
 
     queries.append(
         f"marine diesel engine {topic} training components operation"
     )
 
-    # --------------------------------------------------------
-    # Query 4 - Maintenance / safety
-    # --------------------------------------------------------
-
     queries.append(
         f"marine diesel {topic} maintenance troubleshooting safety"
     )
 
-    # Add ship context when useful.
-    if ship:
-        queries.append(
-            f"{ship} marine engine {topic} technical"
-        )
+    queries = list(
+        dict.fromkeys(queries)
+    )[:4]
 
-    # Avoid excessive API calls.
-    queries = list(dict.fromkeys(queries))[:4]
+    all_results = []
+    all_images = []
 
-    all_results: list[dict[str, Any]] = []
-    all_images: list[str] = []
-
-    seen_urls: set[str] = set()
-    seen_images: set[str] = set()
+    seen_urls = set()
+    seen_images = set()
 
     for query in queries:
+
         try:
             research = _tavily_search(
                 query,
@@ -628,15 +616,19 @@ def run_training_web_research(
                 max_results=5,
                 include_images=True,
             )
+
         except Exception:
-            # One failed query should not destroy the entire
-            # training-generation workflow.
             continue
 
-        for result in research.get("results", []):
-            url = str(result.get("url") or "").strip()
+        for result in research.get(
+            "results",
+            [],
+        ):
 
-            # Deduplicate URLs.
+            url = _to_text(
+                result.get("url")
+            )
+
             if url and url in seen_urls:
                 continue
 
@@ -645,118 +637,103 @@ def run_training_web_research(
 
             all_results.append(
                 {
-                    "title": str(result.get("title") or ""),
+                    "title": _to_text(
+                        result.get("title")
+                    ),
                     "url": url,
                     "content": _bounded(
-                        str(result.get("content") or ""),
+                        result.get("content"),
                         1600,
                     ),
                 }
             )
 
-        for image_url in research.get("images", []):
-            image_url = str(image_url).strip()
+        for image in research.get(
+            "images",
+            [],
+        ):
 
-            if not image_url:
-                continue
+            image_url = _to_text(image)
 
-            if image_url in seen_images:
-                continue
-
-            seen_images.add(image_url)
-            all_images.append(image_url)
-
-    # Limit evidence so the presentation planner does not
-    # receive an enormous prompt.
-    all_results = all_results[:16]
-    all_images = all_images[:12]
-
-    # Include a compact note that manual material is primary.
-    if manual_context:
-        manual_note = (
-            "Manual context was available and should be treated as the "
-            "primary technical source. Online research is supplementary."
-        )
-    else:
-        manual_note = (
-            "No manual context was supplied. Online information should "
-            "be verified against the engine manufacturer's current manual."
-        )
+            if (
+                image_url
+                and image_url not in seen_images
+            ):
+                seen_images.add(
+                    image_url
+                )
+                all_images.append(
+                    image_url
+                )
 
     return {
         "engine": engine,
         "topic": topic,
         "ship": ship,
         "queries": queries,
-        "results": all_results,
-        "images": all_images,
-        "manual_note": manual_note,
+        "results": all_results[:16],
+        "images": all_images[:12],
+        "manual_context": _bounded(
+            manual_context,
+            10000,
+        ),
+        "manual_note": (
+            "Manual information is the primary source. "
+            "Online research is supplementary."
+            if manual_context
+            else
+            "Verify online information against the current "
+            "manufacturer manual."
+        ),
     }
 
 
 # ============================================================
-# JSON EXTRACTION
+# JSON PARSER
 # ============================================================
 
-def _extract_json(text: str) -> Any | None:
-    """
-    Extract JSON from an AI response.
+def _extract_json(text: Any) -> Any | None:
 
-    Handles:
-    - plain JSON
-    - ```json ... ```
-    - JSON surrounded by explanatory text
-    """
-
-    if not text:
-        return None
+    if not isinstance(text, str):
+        text = _to_text(text)
 
     cleaned = text.strip()
 
-    # Remove markdown fences.
     cleaned = re.sub(
-        r"^```(?:json)?\s*",
+        r"^```json\s*",
         "",
         cleaned,
         flags=re.IGNORECASE,
+    )
+
+    cleaned = re.sub(
+        r"^```\s*",
+        "",
+        cleaned,
     )
 
     cleaned = re.sub(
         r"\s*```$",
         "",
         cleaned,
-        flags=re.IGNORECASE,
     )
 
-    # First attempt: whole response.
     try:
         return json.loads(cleaned)
     except Exception:
         pass
 
-    # Second attempt: locate first JSON object.
-    object_match = re.search(
+    match = re.search(
         r"\{.*\}",
         cleaned,
         flags=re.DOTALL,
     )
 
-    if object_match:
+    if match:
         try:
-            return json.loads(object_match.group(0))
-        except Exception:
-            pass
-
-    # Third attempt: locate first JSON array.
-    array_match = re.search(
-        r"\[.*\]",
-        cleaned,
-        flags=re.DOTALL,
-    )
-
-    if array_match:
-        try:
-            return json.loads(array_match.group(0))
+            return json.loads(
+                match.group(0)
+            )
         except Exception:
             pass
 
@@ -764,7 +741,7 @@ def _extract_json(text: str) -> Any | None:
 
 
 # ============================================================
-# PRESENTATION PLAN FALLBACK
+# FALLBACK PRESENTATION
 # ============================================================
 
 def _fallback_presentation_plan(
@@ -772,9 +749,6 @@ def _fallback_presentation_plan(
     ship: str,
     topic: str,
 ) -> dict[str, Any]:
-    """
-    Safe fallback if the AI does not return valid JSON.
-    """
 
     return {
         "presentation_title": (
@@ -782,46 +756,47 @@ def _fallback_presentation_plan(
             if engine
             else f"Marine Engine Training — {topic}"
         ),
-        "subtitle": ship or "Technical Training",
+        "subtitle": (
+            ship
+            if ship
+            else "Technical Training"
+        ),
         "slides": [
             {
                 "title": "Learning Objectives",
-                "purpose": "Introduce the skills technicians should gain.",
+                "purpose": "Introduce the learning goals.",
                 "bullets": [
                     f"Understand the {topic} system",
-                    "Identify the main components",
+                    "Identify major components",
                     "Explain the operating sequence",
-                    "Recognize common faults and checks",
+                    "Recognize common faults",
                 ],
-                "visual_type": "diagram",
-                "visual_query": f"marine engine {topic} system diagram",
+                "visual_type": "objectives",
+                "visual_query": "",
                 "source_preference": "manual_first",
-                "speaker_note": (
-                    "Introduce the topic and explain why it matters "
-                    "during normal operation and troubleshooting."
-                ),
+                "speaker_note": "Introduce the training topic.",
             },
             {
                 "title": "System Overview",
-                "purpose": "Show the overall system and major components.",
+                "purpose": "Introduce the complete system.",
                 "bullets": [
-                    "Identify the major components",
-                    "Follow the main flow path",
-                    "Relate components to engine operation",
+                    "Major components",
+                    "System boundaries",
+                    "Main flow path",
                 ],
                 "visual_type": "manual_page",
                 "visual_query": f"{engine} {topic} diagram",
                 "source_preference": "manual_first",
-                "speaker_note": "Use the supplied manual where available.",
+                "speaker_note": "Use the manual figure when available.",
             },
             {
                 "title": "How the System Works",
                 "purpose": "Explain the operating sequence.",
                 "bullets": [
-                    "Input / supply",
+                    "Input",
                     "Main process",
                     "Control and monitoring",
-                    "Return / output",
+                    "Output / return",
                 ],
                 "visual_type": "process_diagram",
                 "visual_query": f"marine diesel {topic} flow diagram",
@@ -832,89 +807,89 @@ def _fallback_presentation_plan(
                 "title": "Component Spotlight",
                 "purpose": "Explain important components.",
                 "bullets": [
-                    "Component function",
-                    "Normal operating role",
-                    "Important inspection points",
+                    "Function",
+                    "Operating role",
+                    "Inspection points",
                 ],
-                "visual_type": "photo_or_diagram",
+                "visual_type": "component_cards",
                 "visual_query": f"marine engine {topic} components",
                 "source_preference": "manual_or_web",
-                "speaker_note": "Use labelled imagery where possible.",
+                "speaker_note": "Use relevant technical images.",
             },
             {
                 "title": "Technician Checks",
-                "purpose": "Give technicians a practical inspection sequence.",
+                "purpose": "Provide a practical inspection sequence.",
                 "bullets": [
-                    "Confirm the reported symptom",
-                    "Check obvious external conditions",
-                    "Verify relevant pressures / temperatures",
-                    "Check sensors, connections and components",
+                    "Confirm the symptom",
+                    "Check external conditions",
+                    "Verify measurements",
+                    "Inspect relevant components",
                 ],
                 "visual_type": "checklist",
                 "visual_query": "",
                 "source_preference": "manual_first",
-                "speaker_note": "Always follow the engine manufacturer's procedure.",
+                "speaker_note": "Follow the manufacturer's procedure.",
             },
             {
                 "title": "Fault Diagnosis",
-                "purpose": "Connect symptoms to verification steps.",
+                "purpose": "Connect symptoms to checks.",
                 "bullets": [
                     "Symptom",
-                    "Possible system area",
+                    "Possible area",
                     "Verification",
                     "Corrective action",
                 ],
                 "visual_type": "diagnostic_flow",
                 "visual_query": f"marine diesel {topic} troubleshooting",
                 "source_preference": "manual_first",
-                "speaker_note": "Avoid replacing components before verification.",
+                "speaker_note": "Verify before replacing components.",
             },
             {
                 "title": "Maintenance & Safety",
-                "purpose": "Cover routine maintenance and hazards.",
+                "purpose": "Cover maintenance and hazards.",
                 "bullets": [
-                    "Follow manufacturer maintenance intervals",
-                    "Use correct PPE",
-                    "Isolate energy sources where required",
-                    "Allow hot components to cool before work",
+                    "Follow maintenance intervals",
+                    "Use required PPE",
+                    "Isolate energy sources",
+                    "Beware of hot and pressurized systems",
                 ],
                 "visual_type": "safety_callout",
-                "visual_query": f"marine diesel engine {topic} maintenance safety",
+                "visual_query": f"marine diesel {topic} maintenance safety",
                 "source_preference": "manual_first",
-                "speaker_note": "Use the engine manual's exact safety instructions.",
+                "speaker_note": "Use exact manual safety instructions.",
             },
             {
-                "title": "Technician Knowledge Check",
-                "purpose": "Reinforce the main learning points.",
+                "title": "Knowledge Check",
+                "purpose": "Reinforce learning.",
                 "bullets": [
                     "What is the normal flow path?",
-                    "Which components require inspection?",
-                    "What could cause the reported symptom?",
+                    "Which components need inspection?",
+                    "What can cause the symptom?",
                 ],
                 "visual_type": "questions",
                 "visual_query": "",
                 "source_preference": "generated",
-                "speaker_note": "Use these questions for a short classroom discussion.",
+                "speaker_note": "Use as a technician discussion.",
             },
             {
                 "title": "References",
-                "purpose": "Identify the technical sources used.",
+                "purpose": "Show technical sources.",
                 "bullets": [
                     "Supplied engine manuals",
                     "Manufacturer documentation",
-                    "Reputable marine engineering references",
+                    "Technical marine references",
                 ],
                 "visual_type": "references",
                 "visual_query": "",
                 "source_preference": "all_sources",
-                "speaker_note": "Verify technical details against the current manual.",
+                "speaker_note": "Verify details against the current manual.",
             },
         ],
     }
 
 
 # ============================================================
-# PROFESSIONAL TRAINING PRESENTATION PLANNER
+# PRESENTATION PLANNER
 # ============================================================
 
 def generate_training_presentation_plan(
@@ -922,108 +897,148 @@ def generate_training_presentation_plan(
     engine: str,
     ship: str,
     topic: str,
-    manual_context: str,
-    web_evidence: dict[str, Any],
+    manual_context: Any,
+    web_evidence: Any,
 ) -> dict[str, Any]:
-    """
-    Ask the selected AI provider to design a professional
-    technical training presentation.
-
-    The output is structured JSON consumed by app.py.
-    """
 
     engine = _clean_text(engine)
     ship = _clean_text(ship)
     topic = _clean_text(topic)
-    manual_context = _clean_text(manual_context)
 
-    web_evidence = web_evidence or {}
+    # IMPORTANT:
+    # manual_context may accidentally arrive as a dict.
+    # Convert it safely instead of calling .strip().
+    manual_context = _to_text(
+        manual_context
+    )
 
-    results = web_evidence.get("results", [])
-    images = web_evidence.get("images", [])
+    # IMPORTANT:
+    # web_evidence is intentionally a dictionary.
+    # Never call .strip() on it.
+    if isinstance(
+        web_evidence,
+        dict,
+    ):
+        research = web_evidence
+    else:
+        research = {
+            "results": [],
+            "images": [],
+        }
+
+    results = research.get(
+        "results",
+        [],
+    )
+
+    images = research.get(
+        "images",
+        [],
+    )
 
     # --------------------------------------------------------
-    # Build compact web evidence.
+    # Web evidence
     # --------------------------------------------------------
 
-    web_parts: list[str] = []
+    evidence_parts = []
 
-    for i, result in enumerate(results[:16], start=1):
-        web_parts.append(
-            f"WEB SOURCE {i}\n"
-            f"Title: {result.get('title', '')}\n"
-            f"URL: {result.get('url', '')}\n"
-            f"Evidence: {result.get('content', '')}"
+    for number, result in enumerate(
+        results[:16],
+        start=1,
+    ):
+
+        if not isinstance(
+            result,
+            dict,
+        ):
+            continue
+
+        evidence_parts.append(
+            f"WEB SOURCE {number}\n"
+            f"Title: {_to_text(result.get('title'))}\n"
+            f"URL: {_to_text(result.get('url'))}\n"
+            f"Evidence: {_to_text(result.get('content'))}"
         )
 
-    web_text = "\n\n".join(web_parts)
+    web_text = "\n\n".join(
+        evidence_parts
+    )
 
     image_text = "\n".join(
-        f"- {url}"
+        f"- {_to_text(url)}"
         for url in images[:12]
     )
+
+    # --------------------------------------------------------
+    # System prompt
+    # --------------------------------------------------------
 
     system_prompt = """
 You are the MarineWise AI Professional Training Presentation Planner.
 
-You create technically accurate presentation structures for marine
+Create a professional technical training presentation for marine
 engineers and technicians.
 
-The supplied engine manual material is the PRIMARY technical source.
+The supplied manufacturer manual is the PRIMARY technical source.
 
-Online research is SECONDARY and must never override the manufacturer
-manual when the manual contains a specific instruction or specification.
+Online research is SECONDARY.
 
-Create an 8 to 10 slide professional training presentation.
+Do not override specific manufacturer instructions with generic
+online information.
 
-The presentation must be:
-- technically clear
-- concise
-- practical
-- visually driven
-- suitable for marine engineering technicians
-- suitable for a professional PowerPoint deck
+Create 8 to 10 slides.
 
-Do not create walls of text.
-
-Each slide should have:
+Each slide must contain:
 - title
 - purpose
-- 3 to 5 concise bullets maximum
+- 3 to 5 concise bullets
 - visual_type
 - visual_query
 - source_preference
 - speaker_note
 
-Possible visual_type values:
-- title
-- objectives
-- manual_page
-- photo_or_diagram
-- process_diagram
-- diagnostic_flow
-- checklist
-- safety_callout
-- questions
-- references
-- component_cards
+Use:
+manual_page
+photo_or_diagram
+process_diagram
+diagnostic_flow
+checklist
+safety_callout
+component_cards
+questions
+references
 
-Use diagrams when a system process needs to be explained.
-
-Use manual_page when the supplied manual has a relevant page or figure.
-
-Use photo_or_diagram when an online technical image would help.
-
-Use process_diagram for flow paths.
-
-Use diagnostic_flow for troubleshooting logic.
-
-Use safety_callout for hazards and precautions.
+Do not create walls of text.
 
 Return ONLY valid JSON.
-No markdown.
-No ``` fences.
 """.strip()
+
+    # --------------------------------------------------------
+    # JSON example kept OUTSIDE the f-string.
+    # This prevents the previous format-specifier error.
+    # --------------------------------------------------------
+
+    json_example = """
+{
+  "presentation_title": "Example",
+  "subtitle": "Example",
+  "slides": [
+    {
+      "title": "Example Slide",
+      "purpose": "Explain the topic",
+      "bullets": [
+        "Point one",
+        "Point two",
+        "Point three"
+      ],
+      "visual_type": "process_diagram",
+      "visual_query": "marine engine system diagram",
+      "source_preference": "manual_first",
+      "speaker_note": "Explain the diagram."
+    }
+  ]
+}
+"""
 
     user_prompt = f"""
 ENGINE:
@@ -1044,66 +1059,60 @@ ONLINE RESEARCH:
 ONLINE IMAGE URLS:
 {_bounded(image_text, 3500)}
 
-Create the presentation plan.
+Create an 8 to 10 slide professional training presentation.
 
 Recommended structure:
+
 1. Title
 2. Learning objectives
 3. System overview
 4. How the system works
 5. Component spotlight
-6. System / process diagram
-7. Fault diagnosis / technician checks
+6. System/process diagram
+7. Fault diagnosis and technician checks
 8. Maintenance and safety
 9. Knowledge check
 10. References
 
-You may combine or adjust slides when technically appropriate,
-but keep the final presentation between 8 and 10 slides.
+Use the manual first whenever relevant.
 
-JSON format:
+JSON format example:
 
-{{
-  "presentation_title": "...",
-  "subtitle": "...",
-  "slides": [
-    {{
-      "title": "...",
-      "purpose": "...",
-      "bullets": ["...", "...", "..."],
-      "visual_type": "...",
-      "visual_query": "...",
-      "source_preference": "...",
-      "speaker_note": "..."
-    }}
-  ]
-}}
+{json_example}
 """.strip()
-
-    # --------------------------------------------------------
-    # Keep the planner prompt bounded.
-    # --------------------------------------------------------
 
     user_prompt = _bounded(
         user_prompt,
         PRESENTATION_PLAN_MAX_PROMPT_CHARS,
     )
 
+    # --------------------------------------------------------
+    # Run AI
+    # --------------------------------------------------------
+
     try:
+
+        provider_clean = _clean_text(
+            provider
+        )
+
+        if provider_clean.lower() == "groq":
+            environment_key = os.getenv(
+                "GROQ_API_KEY"
+            )
+        else:
+            environment_key = os.getenv(
+                "GEMINI_API_KEY"
+            )
+
         raw = run_marine_agent(
-            provider,
+            provider_clean,
             "presentation",
             system_prompt,
             user_prompt,
-            _get_key(
-                provider,
-                os.getenv(
-                    "GROQ_API_KEY"
-                    if provider.lower() == "groq"
-                    else "GEMINI_API_KEY"
-                ),
-            ),
+            environment_key or "",
         )
+
     except Exception:
         return _fallback_presentation_plan(
             engine,
@@ -1111,18 +1120,33 @@ JSON format:
             topic,
         )
 
-    parsed = _extract_json(raw)
+    # --------------------------------------------------------
+    # Parse JSON
+    # --------------------------------------------------------
 
-    if not isinstance(parsed, dict):
+    parsed = _extract_json(
+        raw
+    )
+
+    if not isinstance(
+        parsed,
+        dict,
+    ):
         return _fallback_presentation_plan(
             engine,
             ship,
             topic,
         )
 
-    slides = parsed.get("slides")
+    slides = parsed.get(
+        "slides",
+        [],
+    )
 
-    if not isinstance(slides, list) or not slides:
+    if not isinstance(
+        slides,
+        list,
+    ):
         return _fallback_presentation_plan(
             engine,
             ship,
@@ -1130,60 +1154,95 @@ JSON format:
         )
 
     # --------------------------------------------------------
-    # Normalize the AI-generated slide plan.
+    # Normalize slides
     # --------------------------------------------------------
 
-    normalized_slides: list[dict[str, Any]] = []
+    normalized = []
 
     for slide in slides[:10]:
-        if not isinstance(slide, dict):
+
+        if not isinstance(
+            slide,
+            dict,
+        ):
             continue
 
-        title = str(slide.get("title") or "").strip()
+        title = _clean_text(
+            slide.get("title")
+        )
 
         if not title:
             continue
 
-        bullets = slide.get("bullets", [])
+        bullets = slide.get(
+            "bullets",
+            [],
+        )
 
-        if not isinstance(bullets, list):
-            bullets = [str(bullets)]
+        if not isinstance(
+            bullets,
+            list,
+        ):
+            bullets = [
+                bullets
+            ]
 
         clean_bullets = []
 
         for bullet in bullets[:5]:
-            bullet = str(bullet).strip()
 
-            if bullet:
-                clean_bullets.append(bullet)
+            bullet_text = _clean_text(
+                bullet
+            )
 
-        normalized_slides.append(
+            if bullet_text:
+                clean_bullets.append(
+                    bullet_text
+                )
+
+        normalized.append(
             {
                 "title": title,
-                "purpose": str(
-                    slide.get("purpose") or ""
-                ).strip(),
+
+                "purpose": _clean_text(
+                    slide.get("purpose")
+                ),
+
                 "bullets": clean_bullets,
-                "visual_type": str(
-                    slide.get("visual_type") or "photo_or_diagram"
-                ).strip(),
-                "visual_query": str(
-                    slide.get("visual_query") or ""
-                ).strip(),
-                "source_preference": str(
-                    slide.get("source_preference")
+
+                "visual_type": (
+                    _clean_text(
+                        slide.get(
+                            "visual_type"
+                        )
+                    )
+                    or "photo_or_diagram"
+                ),
+
+                "visual_query": _clean_text(
+                    slide.get(
+                        "visual_query"
+                    )
+                ),
+
+                "source_preference": (
+                    _clean_text(
+                        slide.get(
+                            "source_preference"
+                        )
+                    )
                     or "manual_first"
-                ).strip(),
-                "speaker_note": str(
-                    slide.get("speaker_note")
-                    or ""
-                ).strip(),
+                ),
+
+                "speaker_note": _clean_text(
+                    slide.get(
+                        "speaker_note"
+                    )
+                ),
             }
         )
 
-    # If AI produced fewer than 8 usable slides,
-    # use the reliable fallback structure.
-    if len(normalized_slides) < 8:
+    if len(normalized) < 8:
         return _fallback_presentation_plan(
             engine,
             ship,
@@ -1191,14 +1250,24 @@ JSON format:
         )
 
     return {
-        "presentation_title": str(
-            parsed.get("presentation_title")
+        "presentation_title": (
+            _clean_text(
+                parsed.get(
+                    "presentation_title"
+                )
+            )
             or f"{engine} — {topic}"
-        ).strip(),
-        "subtitle": str(
-            parsed.get("subtitle")
+        ),
+
+        "subtitle": (
+            _clean_text(
+                parsed.get(
+                    "subtitle"
+                )
+            )
             or ship
             or "Technical Training"
-        ).strip(),
-        "slides": normalized_slides,
+        ),
+
+        "slides": normalized,
     }
