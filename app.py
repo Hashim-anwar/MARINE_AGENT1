@@ -1272,13 +1272,14 @@ def add_slide_background(
 ) -> None:
     from pptx.dml.color import RGBColor
     from pptx.enum.shapes import MSO_SHAPE
+    from pptx.util import Inches
 
     shape = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE,
         0,
         0,
-        slide.part.presentation.slide_width,
-        slide.part.presentation.slide_height,
+        Inches(13.333),
+        Inches(7.5),
     )
 
     shape.fill.solid()
@@ -1644,6 +1645,7 @@ def add_process_shapes(
 ) -> None:
     from pptx.dml.color import RGBColor
     from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
+    from pptx.enum.shapes import MSO_CONNECTOR
     from pptx.util import Inches, Pt
 
     steps = steps[:5]
@@ -1699,7 +1701,7 @@ def add_process_shapes(
 
         if index < len(steps) - 1:
             connector = slide.shapes.add_connector(
-                1,
+                MSO_CONNECTOR.STRAIGHT,
                 Inches(
                     x + width
                 ),
@@ -1727,7 +1729,7 @@ def add_process_shapes(
 
 
 def parse_training_plan(
-    raw: str,
+    raw: Any,
 ) -> list[dict[str, Any]]:
     """
     Try to parse the Training Agent JSON output.
@@ -1737,7 +1739,17 @@ def parse_training_plan(
     """
     import json
 
-    cleaned = raw.strip()
+    # The selected AI provider may return a string, dict, or list.
+    # Normalize it before calling string methods.
+    if isinstance(raw, (dict, list)):
+        if isinstance(raw, dict):
+            raw_for_fallback = raw.get("slides", raw)
+        else:
+            raw_for_fallback = raw
+        cleaned = json.dumps(raw)
+    else:
+        raw_for_fallback = safe_text(raw)
+        cleaned = raw_for_fallback
 
     if "```json" in cleaned:
         cleaned = cleaned.split(
@@ -1781,10 +1793,19 @@ def parse_training_plan(
         pass
 
     # Fallback
-    sections = split_text(
-        raw,
-        700,
-    )
+    if isinstance(raw_for_fallback, list):
+        sections = [
+            safe_text(item)
+            for item in raw_for_fallback
+            if safe_text(item)
+        ]
+    elif isinstance(raw_for_fallback, dict):
+        sections = [safe_text(raw_for_fallback)]
+    else:
+        sections = split_text(
+            safe_text(raw_for_fallback),
+            700,
+        )
 
     slides: list[dict[str, Any]] = []
 
@@ -4034,37 +4055,23 @@ def main() -> None:
             learning_page()
 
     except Exception as exc:
-    import traceback
+        import traceback
 
-    st.error(f"MarineWise AI encountered an error: {exc}")
+        message = str(exc)
 
-    with st.expander("Show technical error details"):
-        st.code(
-            traceback.format_exc(),
-            language="text",
+        st.error(
+            f"MarineWise AI encountered an error: {exc}"
         )
 
-    st.error(f"MarineWise AI encountered an error: {exc}")
-
-    with st.expander("Show technical error details"):
-        st.code(
-            traceback.format_exc(),
-            language="text",
-        )
-
-    st.error(f"MarineWise AI encountered an error: {exc}")
-
-    with st.expander("Show technical error details"):
-        st.code(
-            traceback.format_exc(),
-            language="text",
-        )
+        with st.expander("Show technical error details"):
+            st.code(
+                traceback.format_exc(),
+                language="text",
+            )
 
         if (
-            "context_length_exceeded"
-            in message
-            or "reduce the length"
-            in message.lower()
+            "context_length_exceeded" in message
+            or "reduce the length" in message.lower()
         ):
             st.error(
                 f"The request was too large for the "
@@ -4076,17 +4083,12 @@ def main() -> None:
                 "small context budget. Training uses a "
                 "separate larger context budget."
             )
-
         else:
-            st.error(
-                f"MarineWise AI encountered an error: {exc}"
+            st.caption(
+                "Also check that the selected provider API key, "
+                "TAVILY_API_KEY, and uploaded manual are configured "
+                "correctly."
             )
-
-        st.caption(
-            "Also check that the selected provider API key, "
-            "TAVILY_API_KEY, and uploaded manual are configured "
-            "correctly."
-        )
 
 
 if __name__ == "__main__":
