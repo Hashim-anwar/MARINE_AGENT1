@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from groq import Groq
 
 MODEL = "openai/gpt-oss-120b"
+MAX_PROMPT_CHARS = 22000
+MAX_COMPLETION_TOKENS = 1800
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,12 @@ def run_marine_agent(agent_kind: str, system_prompt: str, user_prompt: str) -> s
         f"{system_prompt}"
     )
 
+    # Keep prompts bounded. A long PDF can otherwise push the request beyond
+    # the practical request/token limits even though the model has a large
+    # theoretical context window.
+    if len(user_prompt) > MAX_PROMPT_CHARS:
+        user_prompt = user_prompt[:MAX_PROMPT_CHARS] + "\n[Manual context truncated for safety.]"
+
     response = _client().chat.completions.create(
         model=MODEL,
         messages=[
@@ -99,6 +107,7 @@ def run_marine_agent(agent_kind: str, system_prompt: str, user_prompt: str) -> s
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.2,
-        max_completion_tokens=3000,
+        reasoning_effort="low",
+        max_completion_tokens=MAX_COMPLETION_TOKENS,
     )
     return response.choices[0].message.content or "No answer was returned."
