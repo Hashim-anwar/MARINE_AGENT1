@@ -17,11 +17,14 @@ TAVILY_API_KEY = "your-tavily-key"
 
 The app does not hardcode API keys. You can switch providers from the sidebar without rebuilding the FAISS manual index.
 
-### Tavily online search
+### Provider-specific online search
 
-Tavily is a separate web-search layer. When the user explicitly chooses **Yes — Search Online** in troubleshooting, MarineWise searches the public web with `TAVILY_API_KEY`, then uses the selected Groq or Gemini model to synthesize the returned snippets.
+When the user explicitly requests online troubleshooting, the selected provider is used:
 
-The manual FAISS/RAG index remains local to the app session and is not replaced, deleted, or modified by Tavily results. Training Agent 2A/2B/2C does not use the troubleshooting search limit.
+- Groq uses its supported `browser_search` built-in tool.
+- Gemini uses Google Search grounding.
+
+The manual RAG index remains local to the app session and is not replaced by online results.
 
 ### Important context separation
 
