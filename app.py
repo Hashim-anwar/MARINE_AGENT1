@@ -36,13 +36,6 @@ def selected_provider() -> str:
     return st.session_state.get("ai_provider", "Groq")
 
 
-def require_tavily_key() -> str:
-    key = get_secret("TAVILY_API_KEY")
-    if not key:
-        raise RuntimeError("TAVILY_API_KEY is not configured. Add it to Streamlit Secrets or your environment.")
-    return key
-
-
 def require_provider_key(provider: str | None = None) -> str:
     provider = provider or selected_provider()
     env_name = "GROQ_API_KEY" if provider == "Groq" else "GEMINI_API_KEY"
@@ -56,13 +49,7 @@ def require_provider_key(provider: str | None = None) -> str:
 
 def ask_web(system_prompt: str, user_prompt: str) -> str:
     provider = selected_provider()
-    return run_web_search(
-        provider,
-        system_prompt,
-        user_prompt,
-        require_provider_key(provider),
-        require_tavily_key(),
-    )
+    return run_web_search(provider, system_prompt, user_prompt, require_provider_key(provider))
 
 
 def run_agent(system_prompt: str, user_prompt: str, agent_kind: str) -> str:
@@ -115,10 +102,6 @@ def sidebar_manuals() -> None:
         st.sidebar.success(f"{provider} API key configured ✓")
     else:
         st.sidebar.warning(f"Add {key_name} to Streamlit Secrets.")
-    if get_secret("TAVILY_API_KEY"):
-        st.sidebar.success("Tavily web-search key configured ✓")
-    else:
-        st.sidebar.warning("Add TAVILY_API_KEY for online search.")
     st.sidebar.markdown("### Manuals")
 
     uploads = st.sidebar.file_uploader(
@@ -151,7 +134,7 @@ def sidebar_manuals() -> None:
         else:
             try:
                 with st.spinner("Reading manuals and building the FAISS index..."):
-                    st.session_state.rag = build_index(items, cached_embedder())
+                    st.session_state.rag = build_index(items, get_embedder())
                 st.session_state.last_retrieved = []
                 st.sidebar.success(f"Indexed {len(items)} manual(s).")
             except Exception as exc:
@@ -206,7 +189,7 @@ def troubleshooting_page() -> None:
 
         query = make_context_query(manufacturer, engine_model, defect)
         with st.spinner("Searching the manuals..."):
-            results = search_index(rag, query, cached_embedder(), k=6)
+            results = search_index(rag, query, get_embedder(), k=6)
             context, relevant = retrieve_context(results, min_score=0.32, max_chunks=2, max_chars=3000)
             st.session_state.troubleshooting_context = context
             st.session_state.troubleshooting_sources = relevant
@@ -293,6 +276,7 @@ def troubleshooting_page() -> None:
                     f"Find reliable information for {case['manufacturer']} {case['engine_model']}, "
                     f"serial {case['serial'] or 'not provided'}, symptom/alarm: {case['defect']}. "
                     "Explain likely checks and safe next steps.",
+                    browser_search=True,
                 )
             st.session_state.troubleshooting_web_answer = web_answer
 
@@ -330,7 +314,7 @@ def training_material_page() -> None:
     relevant: list[dict[str, Any]] = []
     if rag:
         with st.spinner("Searching manuals first..."):
-            results = search_index(rag, f"{engine} {topic}", cached_embedder(), k=6)
+            results = search_index(rag, f"{engine} {topic}", get_embedder(), k=6)
             context, relevant = retrieve_context(results, min_score=0.30, max_chunks=2, max_chars=3000)
             st.session_state.last_retrieved = relevant
     else:
@@ -406,7 +390,7 @@ def quiz_page() -> None:
     relevant: list[dict[str, Any]] = []
     if rag:
         with st.spinner("Searching manuals first..."):
-            results = search_index(rag, topic, cached_embedder(), k=6)
+            results = search_index(rag, topic, get_embedder(), k=6)
             context, relevant = retrieve_context(results, min_score=0.30, max_chunks=2, max_chars=3000)
             st.session_state.last_retrieved = relevant
 
