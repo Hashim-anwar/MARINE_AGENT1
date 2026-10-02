@@ -31,10 +31,17 @@ from PIL import Image, ImageOps
 
 from agents import (
     run_marine_agent,
-    run_training_web_research,
-    generate_training_presentation_plan,
     run_web_search,
 )
+
+try:
+    from agents import (
+        run_training_web_research,
+        generate_training_presentation_plan,
+    )
+except ImportError:
+    run_training_web_research = None
+    generate_training_presentation_plan = None
 
 from rag import (
     DEFAULT_CHUNK_SIZE,
