@@ -1063,11 +1063,11 @@ but keep the final presentation between 8 and 10 slides.
 
 JSON format:
 
-{
+{{
   "presentation_title": "...",
   "subtitle": "...",
   "slides": [
-    {
+    {{
       "title": "...",
       "purpose": "...",
       "bullets": ["...", "...", "..."],
@@ -1075,9 +1075,9 @@ JSON format:
       "visual_query": "...",
       "source_preference": "...",
       "speaker_note": "..."
-    }
+    }}
   ]
-}
+}}
 """.strip()
 
     # --------------------------------------------------------
