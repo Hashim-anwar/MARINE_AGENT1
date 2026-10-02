@@ -4034,7 +4034,15 @@ def main() -> None:
             learning_page()
 
     except Exception as exc:
-        message = str(exc)
+    import traceback
+
+    st.error(f"MarineWise AI encountered an error: {exc}")
+
+    with st.expander("Show technical error details"):
+        st.code(
+            traceback.format_exc(),
+            language="text",
+        )
 
         if (
             "context_length_exceeded"
