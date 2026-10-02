@@ -1,4 +1,4 @@
-"""MarineWise AI - simple Streamlit MVP for marine engine troubleshooting and training."""
+
 
 from __future__ import annotations
 
@@ -187,61 +187,125 @@ def troubleshooting_page() -> None:
         )
         submitted = st.form_submit_button("Troubleshoot", type="primary")
 
-    if not submitted:
-        return
-    if not engine_model.strip() or not defect.strip():
-        st.warning("Please enter the engine model and defect/alarm.")
+    if submitted:
+        if not engine_model.strip() or not defect.strip():
+            st.warning("Please enter the engine model and defect/alarm.")
+            return
+
+        rag = st.session_state.get("rag")
+        if not rag:
+            st.warning("No manuals are indexed. Build the FAISS index from the sidebar first.")
+            return
+
+        # Save the case because clicking the Yes/No button below causes a Streamlit rerun.
+        st.session_state.troubleshooting_case = {
+            "manufacturer": manufacturer,
+            "engine_model": engine_model.strip(),
+            "serial": serial.strip(),
+            "defect": defect.strip(),
+        }
+        st.session_state.troubleshooting_answer = None
+        st.session_state.troubleshooting_web_answer = None
+        st.session_state.troubleshooting_web_choice = None
+
+        query = make_context_query(manufacturer, engine_model, defect)
+        with st.spinner("Searching the manuals..."):
+            results = search_index(rag, query, cached_embedder(), k=8)
+            context, relevant = retrieve_context(results, min_score=0.28)
+            st.session_state.troubleshooting_context = context
+            st.session_state.troubleshooting_sources = relevant
+            st.session_state.last_retrieved = relevant
+
+        if context:
+            with st.spinner(
+                "Preparing a manual-grounded answer with the MarineWise Troubleshooting Agent..."
+            ):
+                answer = run_agent(
+                    "You are a marine engine troubleshooting specialist. Use ONLY the supplied "
+                    "manual excerpts. Do not invent facts, specifications, causes, limits, or "
+                    "procedures. If the excerpts do not actually answer the question, return "
+                    "exactly this first line: 'Not found in manuals. Do you want me to search online?' "
+                    "Do not treat drawings, parts lists, section introductions, or unrelated text as "
+                    "troubleshooting guidance. Cite the source file and exact page number for claims.",
+                    f"Manufacturer: {manufacturer}\nEngine model: {engine_model}\n"
+                    f"Serial: {serial or 'not provided'}\nDefect/alarm: {defect}\n\n"
+                    f"MANUAL EXCERPTS:\n{context}",
+                    "troubleshooting",
+                )
+            st.session_state.troubleshooting_answer = answer
+        else:
+            st.session_state.troubleshooting_answer = (
+                "Not found in manuals. Do you want me to search online?"
+            )
+
+    case = st.session_state.get("troubleshooting_case")
+    if not case:
         return
 
-    rag = st.session_state.get("rag")
-    if not rag:
-        st.warning("No manuals are indexed. Build the FAISS index from the sidebar first.")
-        return
+    relevant = st.session_state.get("troubleshooting_sources", [])
+    context = st.session_state.get("troubleshooting_context", "")
+    answer = st.session_state.get("troubleshooting_answer")
 
-    query = make_context_query(manufacturer, engine_model, defect)
-    with st.spinner("Searching the manuals..."):
-        results = search_index(rag, query, cached_embedder(), k=8)
-        context, relevant = retrieve_context(results, min_score=0.28)
-        st.session_state.last_retrieved = relevant
+    if context or relevant:
+        rag = st.session_state.get("rag")
+        if rag:
+            st.caption(
+                f"Chunk size: {rag['chunk_size']} characters • "
+                f"Retrieved pages: {len({r['page'] for r in relevant})}"
+            )
+        render_sources(relevant)
 
-    st.caption(
-        f"Chunk size: {rag['chunk_size']} characters • "
-        f"Retrieved pages: {len({r['page'] for r in relevant})}"
+    if answer:
+        st.markdown("### Troubleshooting answer")
+        st.write(answer)
+
+    # The model may correctly decide that retrieved text is irrelevant even when FAISS
+    # returned chunks. In that case, show a real Yes/No choice instead of only printing
+    # the question as text.
+    not_found_phrase = "Not found in manuals. Do you want me to search online?"
+    manual_not_found = (
+        not context
+        or not answer
+        or not_found_phrase.lower() in answer.lower()
     )
-    render_sources(relevant)
 
-    if not context:
-        st.warning("Not found in manuals. Do you want me to search online?")
-        if st.button("Yes — search online", key="web_troubleshoot"):
+    if manual_not_found and st.session_state.get("troubleshooting_web_answer") is None:
+        st.warning(not_found_phrase)
+        choice = st.session_state.get("troubleshooting_web_choice")
+        if choice is None:
+            st.write("Would you like MarineWise AI to search reliable online technical sources?")
+            yes_col, no_col = st.columns(2)
+            if yes_col.button("Yes — Search Online", key="web_troubleshoot_yes", type="primary"):
+                st.session_state.troubleshooting_web_choice = "yes"
+                st.rerun()
+            if no_col.button("No — Stay Manual-Only", key="web_troubleshoot_no"):
+                st.session_state.troubleshooting_web_choice = "no"
+                st.rerun()
+            return
+
+        if choice == "no":
+            st.info("Online search was not requested. No web information was used.")
+            return
+
+        if choice == "yes":
             with st.spinner("Searching online with Groq browser search..."):
-                answer = ask_groq(
-                    "You are a marine engine troubleshooting assistant. Search reliable "
-                    "manufacturer documentation and reputable technical sources. Do not "
-                    "invent specifications. Clearly say the answer is from the web and "
-                    "tell the technician to verify against the current engine manual.",
-                    f"Find reliable information for {manufacturer} {engine_model}, "
-                    f"serial {serial or 'not provided'}, symptom/alarm: {defect}. "
+                web_answer = ask_groq(
+                    "You are a marine engine troubleshooting assistant. This answer is FROM THE WEB, "
+                    "not from the supplied manuals. Search reliable manufacturer documentation and "
+                    "reputable technical sources. Do not invent specifications. Clearly say the answer "
+                    "is from the web and tell the technician to verify it against the current engine manual.",
+                    f"Find reliable information for {case['manufacturer']} {case['engine_model']}, "
+                    f"serial {case['serial'] or 'not provided'}, symptom/alarm: {case['defect']}. "
                     "Explain likely checks and safe next steps.",
                     browser_search=True,
                 )
-            st.markdown("### Web-sourced answer")
-            st.write(answer)
-        return
+            st.session_state.troubleshooting_web_answer = web_answer
 
-    with st.spinner("Preparing a manual-grounded answer with the MarineWise Troubleshooting Agent..."):
-        answer = run_agent(
-            "You are a marine engine troubleshooting specialist. Use ONLY the supplied "
-            "manual excerpts. Do not invent facts, specifications, causes, limits, or "
-            "procedures. If the excerpts do not answer the question, say exactly: "
-            "'Not found in manuals. Do you want me to search online?' Cite the source "
-            "file and exact page number for claims.",
-            f"Manufacturer: {manufacturer}\nEngine model: {engine_model}\n"
-            f"Serial: {serial or 'not provided'}\nDefect/alarm: {defect}\n\n"
-            f"MANUAL EXCERPTS:\n{context}",
-            "troubleshooting",
-        )
-    st.markdown("### Troubleshooting answer")
-    st.write(answer)
+    web_answer = st.session_state.get("troubleshooting_web_answer")
+    if web_answer:
+        st.markdown("### Web-sourced answer")
+        st.info("This answer was obtained from online sources after you selected **Yes — Search Online**. Verify it against the current engine manual.")
+        st.write(web_answer)
 
 
 def training_material_page() -> None:
