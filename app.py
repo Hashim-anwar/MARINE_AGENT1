@@ -4044,6 +4044,22 @@ def main() -> None:
             language="text",
         )
 
+    st.error(f"MarineWise AI encountered an error: {exc}")
+
+    with st.expander("Show technical error details"):
+        st.code(
+            traceback.format_exc(),
+            language="text",
+        )
+
+    st.error(f"MarineWise AI encountered an error: {exc}")
+
+    with st.expander("Show technical error details"):
+        st.code(
+            traceback.format_exc(),
+            language="text",
+        )
+
         if (
             "context_length_exceeded"
             in message
