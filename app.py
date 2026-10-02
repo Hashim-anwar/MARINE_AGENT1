@@ -1,4 +1,4 @@
-
+"""MarineWise AI - simple Streamlit MVP for marine engine troubleshooting and training."""
 
 from __future__ import annotations
 
@@ -210,8 +210,8 @@ def troubleshooting_page() -> None:
 
         query = make_context_query(manufacturer, engine_model, defect)
         with st.spinner("Searching the manuals..."):
-            results = search_index(rag, query, cached_embedder(), k=8)
-            context, relevant = retrieve_context(results, min_score=0.28)
+            results = search_index(rag, query, cached_embedder(), k=6)
+            context, relevant = retrieve_context(results, min_score=0.32, max_chunks=4, max_chars=6000)
             st.session_state.troubleshooting_context = context
             st.session_state.troubleshooting_sources = relevant
             st.session_state.last_retrieved = relevant
@@ -335,8 +335,8 @@ def training_material_page() -> None:
     relevant: list[dict[str, Any]] = []
     if rag:
         with st.spinner("Searching manuals first..."):
-            results = search_index(rag, f"{engine} {topic}", cached_embedder(), k=8)
-            context, relevant = retrieve_context(results, min_score=0.25)
+            results = search_index(rag, f"{engine} {topic}", cached_embedder(), k=6)
+            context, relevant = retrieve_context(results, min_score=0.30, max_chunks=4, max_chars=6000)
             st.session_state.last_retrieved = relevant
     else:
         st.info(
@@ -411,8 +411,8 @@ def quiz_page() -> None:
     relevant: list[dict[str, Any]] = []
     if rag:
         with st.spinner("Searching manuals first..."):
-            results = search_index(rag, topic, cached_embedder(), k=8)
-            context, relevant = retrieve_context(results, min_score=0.25)
+            results = search_index(rag, topic, cached_embedder(), k=6)
+            context, relevant = retrieve_context(results, min_score=0.30, max_chunks=4, max_chars=6000)
             st.session_state.last_retrieved = relevant
 
     with st.spinner("Generating quiz and answer key with the MarineWise Training Agent..."):
@@ -771,8 +771,13 @@ def main() -> None:
         else:
             learning_page()
     except Exception as exc:
-        st.error(f"MarineWise AI encountered an error: {exc}")
-        st.caption("Check that GROQ_API_KEY is configured and that your uploaded manual is readable.")
+        message = str(exc)
+        if "context_length_exceeded" in message or "reduce the length" in message.lower():
+            st.error("The request was too large for the current Groq request limits.")
+            st.info("MarineWise has been updated to send fewer manual excerpts and shorter model responses. Rebuild the FAISS index and try the same question again.")
+        else:
+            st.error(f"MarineWise AI encountered an error: {exc}")
+        st.caption("Also check that GROQ_API_KEY is configured and that your uploaded manual is readable.")
 
 
 if __name__ == "__main__":
