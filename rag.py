@@ -138,15 +138,35 @@ def search_index(
 def retrieve_context(
     results: list[dict[str, Any]],
     min_score: float = 0.28,
+    max_chunks: int = 5,
+    max_chars: int = 7000,
 ) -> tuple[str, list[dict[str, Any]]]:
-    relevant = [item for item in results if item["score"] >= min_score]
+    """Return a small, high-signal evidence set for the LLM.
+
+    This prevents a large manual from turning a good FAISS search into an
+    oversized Groq request. Results are already similarity-ranked, so the
+    highest scoring chunks are retained first.
+    """
+    relevant = [item for item in results if item["score"] >= min_score][:max_chunks]
     parts = []
+    used_chars = 0
+    kept = []
     for number, item in enumerate(relevant, start=1):
-        parts.append(
+        part = (
             f"SOURCE {number}: {item['source']} | PAGE {item['page']} | "
             f"similarity {item['score']:.3f}\n{item['text']}"
         )
-    return "\n\n".join(parts), relevant
+        if used_chars + len(part) > max_chars:
+            remaining = max_chars - used_chars
+            if remaining > 300:
+                part = part[:remaining] + "\n[Excerpt truncated.]"
+                parts.append(part)
+                kept.append(item)
+            break
+        parts.append(part)
+        kept.append(item)
+        used_chars += len(part)
+    return "\n\n".join(parts), kept
 
 
 def download_google_drive_pdf(url: str) -> tuple[str, bytes]:
