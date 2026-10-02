@@ -268,16 +268,15 @@ def troubleshooting_page() -> None:
 
         if choice == "yes":
             with st.spinner("Searching online with the selected AI provider..."):
-                web_answer = ask_web(
-                    "You are a marine engine troubleshooting assistant. This answer is FROM THE WEB, "
-                    "not from the supplied manuals. Search reliable manufacturer documentation and "
-                    "reputable technical sources. Do not invent specifications. Clearly say the answer "
-                    "is from the web and tell the technician to verify it against the current engine manual.",
-                    f"Find reliable information for {case['manufacturer']} {case['engine_model']}, "
-                    f"serial {case['serial'] or 'not provided'}, symptom/alarm: {case['defect']}. "
-                    "Explain likely checks and safe next steps.",
-                    browser_search=True,
-                )
+web_answer = ask_web(
+    "You are a marine engine troubleshooting assistant. This answer is FROM THE WEB, "
+    "not from the supplied manuals. Search reliable manufacturer documentation and "
+    "reputable technical sources. Do not invent specifications. Clearly say the answer "
+    "is from the web and tell the technician to verify it against the current engine manual.",
+    f"Find reliable information for {case['manufacturer']} {case['engine_model']}, "
+    f"serial {case['serial'] or 'not provided'}, symptom/alarm: {case['defect']}. "
+    "Explain likely checks and safe next steps.",
+)
             st.session_state.troubleshooting_web_answer = web_answer
 
     web_answer = st.session_state.get("troubleshooting_web_answer")
