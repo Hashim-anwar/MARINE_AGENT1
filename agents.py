@@ -1359,7 +1359,11 @@ def _crewai_llm(provider: str, api_key: str):
         # OpenAI-compatible API endpoint, so the existing Groq API key
         # remains the credential and no OpenAI key is required.
         return LLM(
+            # CrewAI native OpenAI-compatible mode.  Groq requires the
+            # full model ID `openai/gpt-oss-120b`; custom_openai=True
+            # prevents CrewAI from stripping that provider/model prefix.
             model=GROQ_MODEL,
+            custom_openai=True,
             api_key=key,
             base_url="https://api.groq.com/openai/v1",
         )
