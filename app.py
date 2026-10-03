@@ -25,13 +25,6 @@ import re
 import textwrap
 from typing import Any
 
-# ReportLab Paragraph is used by the troubleshooting PDF generator.
-# Import it at module level so the PDF function cannot fail with NameError.
-try:
-    from reportlab.platypus import Paragraph
-except ImportError:
-    Paragraph = None
-
 import numpy as np
 
 import requests
@@ -43,6 +36,7 @@ from agents import (
     run_web_search,
     run_marine_command_center,
 )
+
 try:
     from agents import (
         run_training_web_research,
@@ -275,249 +269,6 @@ def ask_web(
 
 def safe_text(value: Any) -> str:
     return str(value or "").strip()
-
-
-# ============================================================
-# OUTPUT QUALITY / DOCUMENT HELPERS
-# ============================================================
-
-
-def clean_output_text(value: Any) -> str:
-    """Normalize generated text before sending it to PDF/Word/PPT."""
-    import unicodedata
-
-    text = safe_text(value)
-    replacements = {
-        "\u00a0": " ",
-        "\u200b": "",
-        "\u200c": "",
-        "\u200d": "",
-        "\ufeff": "",
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u2013": "-",
-        "\u2014": "-",
-        "\u2212": "-",
-        "\u2022": "-",
-        "\u2192": "->",
-        "\u2190": "<-",
-        "\u2713": "[OK]",
-        "\u2714": "[OK]",
-        "\u2717": "[X]",
-        "\u2718": "[X]",
-        "\u00d7": "x",
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-
-    # Remove invisible Unicode formatting/control characters that can render
-    # as black dots/squares in PDF viewers while preserving tabs/newlines.
-    cleaned = []
-    for char in text:
-        category = unicodedata.category(char)
-        if category == "Cf":
-            continue
-        if category == "Cc" and char not in {"\n", "\t", "\r"}:
-            continue
-        cleaned.append(char)
-
-    text = "".join(cleaned)
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def _find_document_font() -> tuple[str, str | None, str | None, str | None]:
-    """Return (font_name, regular_path, bold_path, italic_path).
-
-    Times New Roman is preferred. A Unicode serif fallback is used only when
-    Times New Roman is not installed on the host running Streamlit.
-    """
-    candidates = [
-        (
-            "Times New Roman",
-            r"C:\\Windows\\Fonts\\times.ttf",
-            r"C:\\Windows\\Fonts\\timesbd.ttf",
-            r"C:\\Windows\\Fonts\\timesi.ttf",
-        ),
-        (
-            "Times New Roman",
-            r"/Library/Fonts/Times New Roman.ttf",
-            r"/Library/Fonts/Times New Roman Bold.ttf",
-            r"/Library/Fonts/Times New Roman Italic.ttf",
-        ),
-        (
-            "Times New Roman",
-            r"/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman.ttf",
-            r"/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman_Bold.ttf",
-            r"/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman_Italic.ttf",
-        ),
-    ]
-
-    for name, regular, bold, italic in candidates:
-        if os.path.exists(regular):
-            return name, regular, bold if os.path.exists(bold) else None, italic if os.path.exists(italic) else None
-
-    try:
-        from matplotlib import font_manager
-        regular = font_manager.findfont(font_manager.FontProperties(family="DejaVu Serif"))
-        bold = font_manager.findfont(font_manager.FontProperties(family="DejaVu Serif", weight="bold"))
-        italic = font_manager.findfont(font_manager.FontProperties(family="DejaVu Serif", style="italic"))
-        return "DejaVu Serif", regular, bold, italic
-    except Exception:
-        return "Times-Roman", None, None, None
-
-
-def _register_reportlab_fonts() -> str:
-    """Register a Unicode serif font for ReportLab and return its family name."""
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-
-    family, regular, bold, italic = _find_document_font()
-    if regular:
-        safe_family = "MarineWiseSerif"
-        try:
-            if safe_family not in pdfmetrics.getRegisteredFontNames():
-                pdfmetrics.registerFont(TTFont(safe_family, regular))
-                if bold:
-                    pdfmetrics.registerFont(TTFont(f"{safe_family}-Bold", bold))
-                if italic:
-                    pdfmetrics.registerFont(TTFont(f"{safe_family}-Italic", italic))
-                if bold and italic:
-                    try:
-                        pdfmetrics.registerFont(TTFont(f"{safe_family}-BoldItalic", bold))
-                    except Exception:
-                        pass
-        except Exception:
-            return "Times-Roman"
-        return safe_family
-    return "Times-Roman"
-
-
-def _set_docx_run_font(run, font_name: str = "Times New Roman", size: int = 14, bold: bool | None = None) -> None:
-    from docx.shared import Pt
-
-    run.font.name = font_name
-    run.font.size = Pt(size)
-    # Make the font name explicit for East Asia/Word fallback as well.
-    try:
-        from docx.oxml.ns import qn
-        rpr = run._element.get_or_add_rPr()
-        rfonts = rpr.get_or_add_rFonts()
-        rfonts.set(qn("w:ascii"), font_name)
-        rfonts.set(qn("w:hAnsi"), font_name)
-        rfonts.set(qn("w:eastAsia"), font_name)
-    except Exception:
-        pass
-    if bold is not None:
-        run.bold = bold
-
-
-def _add_docx_paragraph(document, text: str, size: int = 14, bold: bool = False, align: int = 3):
-    """Add a clean Times New Roman paragraph; align=3 is justified."""
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-
-    paragraph = document.add_paragraph()
-    paragraph.alignment = {
-        0: WD_ALIGN_PARAGRAPH.LEFT,
-        1: WD_ALIGN_PARAGRAPH.CENTER,
-        2: WD_ALIGN_PARAGRAPH.RIGHT,
-        3: WD_ALIGN_PARAGRAPH.JUSTIFY,
-    }.get(align, WD_ALIGN_PARAGRAPH.JUSTIFY)
-    from docx.shared import Pt
-    paragraph.paragraph_format.space_after = Pt(6)
-    run = paragraph.add_run(clean_output_text(text))
-    _set_docx_run_font(run, "Times New Roman", size, bold)
-    return paragraph
-
-
-def _add_ppt_text_box(slide, text: str, left: float, top: float, width: float, height: float,
-                      font_size: int = 14, bold: bool = False, color: str = DARK,
-                      align: int = 0, font_name: str = "Times New Roman"):
-    """Add a consistently formatted PPT text box with safe wrapping."""
-    from pptx.dml.color import RGBColor
-    from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
-    from pptx.util import Inches, Pt
-
-    box = slide.shapes.add_textbox(
-        Inches(left), Inches(top), Inches(width), Inches(height)
-    )
-    tf = box.text_frame
-    tf.clear()
-    tf.word_wrap = True
-    tf.margin_left = Inches(0.04)
-    tf.margin_right = Inches(0.04)
-    tf.margin_top = Inches(0.03)
-    tf.margin_bottom = Inches(0.03)
-    tf.vertical_anchor = MSO_ANCHOR.TOP
-    p = tf.paragraphs[0]
-    p.text = clean_output_text(text)
-    p.alignment = {
-        0: PP_ALIGN.LEFT,
-        1: PP_ALIGN.CENTER,
-        2: PP_ALIGN.RIGHT,
-        3: PP_ALIGN.JUSTIFY,
-    }.get(align, PP_ALIGN.LEFT)
-    p.font.name = font_name
-    p.font.size = Pt(font_size)
-    p.font.bold = bold
-    p.font.color.rgb = RGBColor.from_string(color)
-    return box
-
-
-def _add_ppt_bullets(slide, bullets: list[str], left: float, top: float, width: float, height: float,
-                     font_size: int = 14) -> None:
-    from pptx.dml.color import RGBColor
-    from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
-    from pptx.util import Inches, Pt
-
-    box = slide.shapes.add_textbox(
-        Inches(left), Inches(top), Inches(width), Inches(height)
-    )
-    tf = box.text_frame
-    tf.clear()
-    tf.word_wrap = True
-    tf.margin_left = Inches(0.08)
-    tf.margin_right = Inches(0.06)
-    tf.margin_top = Inches(0.04)
-    tf.margin_bottom = Inches(0.04)
-    tf.vertical_anchor = MSO_ANCHOR.TOP
-
-    cleaned = [clean_output_text(b) for b in bullets if clean_output_text(b)]
-    for index, bullet in enumerate(cleaned[:6]):
-        p = tf.paragraphs[0] if index == 0 else tf.add_paragraph()
-        p.text = f"• {bullet}"
-        p.font.name = "Times New Roman"
-        p.font.size = Pt(font_size)
-        p.font.color.rgb = RGBColor.from_string(DARK)
-        p.space_after = Pt(8)
-        p.alignment = PP_ALIGN.LEFT
-        p.level = 0
-
-
-def _source_lines(sources: list[dict[str, Any]] | None = None,
-                  web_sources: list[dict[str, Any]] | None = None) -> list[str]:
-    lines: list[str] = []
-    seen: set[str] = set()
-    for source in sources or []:
-        name = clean_output_text(source.get("source"))
-        page = source.get("page", "")
-        if name:
-            line = f"Manual: {name} — page {page}"
-            if line not in seen:
-                seen.add(line)
-                lines.append(line)
-    for source in web_sources or []:
-        title = clean_output_text(source.get("title")) or "Technical web source"
-        url = clean_output_text(source.get("url"))
-        if url:
-            line = f"Web: {title} — {url}"
-            if line not in seen:
-                seen.add(line)
-                lines.append(line)
-    return lines
 
 
 def split_text(
@@ -954,169 +705,6 @@ def make_context_query(
     )
 
 
-def make_troubleshooting_pdf(
-    case: dict[str, Any],
-    manual_answer: str | None,
-    sources: list[dict[str, Any]] | None = None,
-    web_answer: str | None = None,
-    web_sources: list[dict[str, Any]] | None = None,
-) -> bytes:
-    """Create a structured troubleshooting PDF with 14pt Times New Roman body text.
-
-    The troubleshooting workflow is deliberately kept separate from the existing
-    training-output architecture. This function only formats the already-approved
-    troubleshooting answer(s) for download and does not change the human-in-loop
-    web-search decision.
-    """
-    from reportlab.lib import colors
-    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import ParagraphStyle
-    from reportlab.lib.units import mm
-    from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
-
-    font_name = _register_reportlab_fonts()
-    output = io.BytesIO()
-    document = SimpleDocTemplate(
-        output,
-        pagesize=A4,
-        rightMargin=18 * mm,
-        leftMargin=18 * mm,
-        topMargin=18 * mm,
-        bottomMargin=18 * mm,
-        title=clean_output_text(
-            f"MarineWise AI - Troubleshooting - {case.get('defect', '')}"
-        ),
-        author="MarineWise AI",
-    )
-
-    title_style = ParagraphStyle(
-        "TroubleTitle", fontName=font_name, fontSize=20, leading=24,
-        alignment=TA_CENTER, textColor=colors.HexColor("#17324D"), spaceAfter=8,
-    )
-    meta_style = ParagraphStyle(
-        "TroubleMeta", fontName=font_name, fontSize=14, leading=20,
-        alignment=TA_CENTER, textColor=colors.HexColor("#344054"), spaceAfter=12,
-    )
-    body_style = ParagraphStyle(
-        "TroubleBody", fontName=font_name, fontSize=14, leading=20,
-        alignment=TA_JUSTIFY, textColor=colors.HexColor("#17202A"),
-        spaceAfter=8, allowWidows=0, allowOrphans=0,
-    )
-    step_style = ParagraphStyle(
-        "TroubleStep", fontName=font_name, fontSize=14, leading=20,
-        alignment=TA_JUSTIFY, textColor=colors.HexColor("#17202A"),
-        leftIndent=7 * mm, firstLineIndent=-7 * mm, spaceAfter=10,
-        allowWidows=0, allowOrphans=0,
-    )
-    heading_style = ParagraphStyle(
-        "TroubleHeading", fontName=font_name, fontSize=17, leading=21,
-        alignment=TA_LEFT, textColor=colors.HexColor("#17324D"),
-        spaceBefore=10, spaceAfter=7,
-    )
-    source_style = ParagraphStyle(
-        "TroubleSource", fontName=font_name, fontSize=11, leading=16,
-        alignment=TA_LEFT, textColor=colors.HexColor("#475467"), spaceAfter=5,
-    )
-
-    manufacturer = clean_output_text(case.get("manufacturer")) or "Not specified"
-    engine_model = clean_output_text(case.get("engine_model")) or "Not specified"
-    serial = clean_output_text(case.get("serial")) or "Not provided"
-    defect = clean_output_text(case.get("defect")) or "Not specified"
-
-    story = [
-        Paragraph("MarineWise AI - Step-by-Step Troubleshooting", title_style),
-        Paragraph(
-            safe_paragraph(
-                f"Manufacturer: {manufacturer} | Engine Model: {engine_model} | "
-                f"Serial: {serial}"
-            ),
-            meta_style,
-        ),
-        Paragraph("Reported Defect / Alarm", heading_style),
-        Paragraph(safe_paragraph(defect), body_style),
-    ]
-
-    if manual_answer and manual_answer.strip():
-        story.append(Paragraph("Manual-Grounded Troubleshooting Procedure", heading_style))
-        story.append(
-            Paragraph(
-                safe_paragraph(
-                    "The following procedure is grounded in the supplied manual excerpts. "
-                    "Follow the sequence, verify each expected result before proceeding, "
-                    "and use the current manufacturer procedure for any final adjustment or repair."
-                ),
-                body_style,
-            )
-        )
-        _append_troubleshooting_answer_flow(story, manual_answer, body_style, step_style, heading_style)
-
-    if web_answer and web_answer.strip():
-        story.append(PageBreak())
-        story.append(Paragraph("Web-Sourced Supplementary Troubleshooting", heading_style))
-        story.append(
-            Paragraph(
-                safe_paragraph(
-                    "This section was added only after the human-in-loop online-search approval. "
-                    "Verify all web-derived information against the current manufacturer manual "
-                    "before carrying out work on the equipment."
-                ),
-                body_style,
-            )
-        )
-        _append_troubleshooting_answer_flow(story, web_answer, body_style, step_style, heading_style)
-
-    source_lines = _source_lines(sources or [], web_sources or [])
-    if source_lines:
-        story.append(PageBreak())
-        story.append(Paragraph("Sources & References", heading_style))
-        story.append(
-            Paragraph(
-                safe_paragraph(
-                    "Manual sources are the primary evidence. Web sources are included only "
-                    "when online research was explicitly approved by the user."
-                ),
-                body_style,
-            )
-        )
-        for line in source_lines:
-            story.append(Paragraph(safe_paragraph(line), source_style))
-
-    document.build(story)
-    return output.getvalue()
-
-
-def _append_troubleshooting_answer_flow(
-    story: list,
-    answer: str,
-    body_style: Any,
-    step_style: Any,
-    heading_style: Any,
-) -> None:
-    """Render troubleshooting text as readable numbered steps without changing its content."""
-    text = clean_output_text(answer)
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines:
-        return
-
-    for line in lines:
-        normalized = re.sub(r"^[-*•]+\s*", "", line).strip()
-        normalized = re.sub(r"^#{1,6}\s*", "", normalized).strip()
-        numbered = re.match(r"^(\d+)[.)]\s+(.*)$", normalized)
-        heading = (
-            len(normalized) <= 90
-            and normalized.endswith(":")
-            and not numbered
-        )
-        if heading:
-            story.append(Paragraph(safe_paragraph(normalized.rstrip(":")), heading_style))
-        elif numbered:
-            story.append(Paragraph(safe_paragraph(f"{numbered.group(1)}. {numbered.group(2)}"), step_style))
-        else:
-            story.append(Paragraph(safe_paragraph(normalized), body_style))
-
-
-
 def troubleshooting_page() -> None:
     st.markdown(
         '<div class="main-title">Troubleshooting Agent</div>',
@@ -1195,7 +783,6 @@ def troubleshooting_page() -> None:
 
         st.session_state.troubleshooting_answer = None
         st.session_state.troubleshooting_web_answer = None
-        st.session_state.troubleshooting_web_error = None
         st.session_state.troubleshooting_web_choice = None
 
         query = make_context_query(
@@ -1235,19 +822,6 @@ You are a marine engine troubleshooting specialist.
 
 Use ONLY the supplied manual excerpts.
 
-Your response must be a properly refined, technician-ready, STEP-BY-STEP troubleshooting procedure.
-Do not give a loose paragraph or generic explanation. Organize the response in this order:
-1. Problem / symptom interpretation
-2. Safety and isolation precautions that are explicitly supported by the manual
-3. Step-by-step checks in the correct diagnostic sequence
-4. Expected result for each check
-5. What to do if the expected result is NOT obtained
-6. Root-cause conclusion only when supported by the manual
-7. Corrective action only when supported by the manual
-8. Final verification / return-to-service checks when supported
-
-For every diagnostic step, make the action clear and practical. Keep the sequence logically aligned: start with safe, simple observations/checks before more involved checks, unless the manual specifies another order. Do not invent a sequence when the manual does not support it.
-
 Do not invent:
 - specifications
 - causes
@@ -1255,15 +829,13 @@ Do not invent:
 - procedures
 - component locations
 - maintenance intervals
-- measurements or acceptance criteria
-
-If a required detail is missing from the excerpts, explicitly say that it is not stated in the supplied manual instead of guessing.
 
 If the excerpts do not actually answer the question, return exactly:
 
 Not found in manuals. Do you want me to search online?
 
-Cite the source file and exact page number for claims that are supported by the excerpts.
+Cite the source file and exact page number
+for claims that are supported by the excerpts.
 """,
                     (
                         f"Manufacturer: {manufacturer}\n"
@@ -1275,23 +847,13 @@ Cite the source file and exact page number for claims that are supported by the 
                     "troubleshooting",
                 )
 
-            # The model may repeat the human-in-loop question even though the UI
-            # already renders that question. Store it as a clean not-found state
-            # so the message is shown only once.
-            manual_not_found_markers = (
-                "Not found in manuals. Do you want me to search online?",
-                "Not found in manuals",
-            )
-            if any(
-                marker.lower() in safe_text(answer).lower()
-                for marker in manual_not_found_markers
-            ):
-                st.session_state.troubleshooting_answer = ""
-            else:
-                st.session_state.troubleshooting_answer = answer
+            st.session_state.troubleshooting_answer = answer
 
         else:
-            st.session_state.troubleshooting_answer = ""
+            st.session_state.troubleshooting_answer = (
+                "Not found in manuals. "
+                "Do you want me to search online?"
+            )
 
     case = st.session_state.get(
         "troubleshooting_case"
@@ -1330,9 +892,17 @@ Cite the source file and exact page number for claims that are supported by the 
         st.markdown("### Troubleshooting answer")
         st.write(answer)
 
-    # Human-in-the-loop gate: show this prompt exactly once. The answer itself
-    # is kept free of the UI question so it is not duplicated.
-    manual_not_found = not context or not answer
+    not_found_phrase = (
+        "Not found in manuals. "
+        "Do you want me to search online?"
+    )
+
+    manual_not_found = (
+        not context
+        or not answer
+        or not_found_phrase.lower()
+        in answer.lower()
+    )
 
     if (
         manual_not_found
@@ -1341,10 +911,7 @@ Cite the source file and exact page number for claims that are supported by the 
         )
         is None
     ):
-        st.warning(
-            "Not found in the supplied manuals. "
-            "Would you like MarineWise AI to search reliable online technical sources?"
-        )
+        st.warning(not_found_phrase)
 
         choice = st.session_state.get(
             "troubleshooting_web_choice"
@@ -1387,82 +954,38 @@ Cite the source file and exact page number for claims that are supported by the 
             return
 
         if choice == "yes":
-            # Keep the existing human-in-the-loop architecture, but do not let a
-            # temporary provider outage crash the entire Streamlit page.
-            try:
-                with st.spinner(
-                    "Searching online technical sources..."
-                ):
-                    web_answer = ask_web(
-                        """
+            with st.spinner(
+                "Searching online technical sources..."
+            ):
+                web_answer = ask_web(
+                    """
 You are a marine engine troubleshooting assistant.
 
 This answer is FROM THE WEB, not from the supplied manuals.
-Search reliable manufacturer documentation and reputable technical sources.
 
-Return a properly refined, technician-ready STEP-BY-STEP troubleshooting procedure. Organize it as:
-1. Problem / symptom interpretation
-2. Safety and isolation
-3. Diagnostic checks in sequence
-4. Expected result for each check
-5. Decision point if the result is abnormal
-6. Corrective action when supported by the source
-7. Final verification
+Search reliable manufacturer documentation and reputable
+technical sources.
 
-Do not invent specifications, alarm limits, procedures, component locations, measurements, or maintenance intervals. Clearly identify information that is web-derived and instruct the technician to verify it against the current engine manual.
+Do not invent specifications.
+
+Clearly say that the answer is from the web and instruct
+the technician to verify it against the current engine manual.
 """,
-                        (
-                            f"Find reliable information for "
-                            f"{case['manufacturer']} "
-                            f"{case['engine_model']}, "
-                            f"serial "
-                            f"{case['serial'] or 'not provided'}, "
-                            f"symptom/alarm: "
-                            f"{case['defect']}.\n\n"
-                            "Explain likely checks and safe next steps."
-                        ),
-                    )
-
-                st.session_state.troubleshooting_web_answer = web_answer
-                st.session_state.troubleshooting_web_error = None
-
-            except Exception as exc:
-                error_text = safe_text(exc)
-                is_temporary_provider_error = (
-                    "503" in error_text
-                    or "UNAVAILABLE" in error_text.upper()
-                    or "high demand" in error_text.lower()
-                    or "temporarily unavailable" in error_text.lower()
+                    (
+                        f"Find reliable information for "
+                        f"{case['manufacturer']} "
+                        f"{case['engine_model']}, "
+                        f"serial "
+                        f"{case['serial'] or 'not provided'}, "
+                        f"symptom/alarm: "
+                        f"{case['defect']}.\n\n"
+                        "Explain likely checks and safe next steps."
+                    ),
                 )
 
-                st.session_state.troubleshooting_web_answer = None
-                if is_temporary_provider_error:
-                    st.session_state.troubleshooting_web_error = (
-                        "The online technical-search service is temporarily unavailable "
-                        "(provider returned HTTP 503). Your manual-only troubleshooting "
-                        "workflow is still available. Please try the online search again shortly."
-                    )
-                else:
-                    st.session_state.troubleshooting_web_error = (
-                        "The online technical search could not be completed. "
-                        "Please verify the selected provider API key and TAVILY_API_KEY, "
-                        "then try again."
-                    )
-
-    web_error = st.session_state.get(
-        "troubleshooting_web_error"
-    )
-
-    if web_error:
-        st.warning(web_error)
-        if st.session_state.get("troubleshooting_web_choice") == "yes":
-            if st.button(
-                "Retry Online Search",
-                key="retry_web_troubleshoot",
-            ):
-                st.session_state.troubleshooting_web_answer = None
-                st.session_state.troubleshooting_web_error = None
-                st.rerun()
+            st.session_state.troubleshooting_web_answer = (
+                web_answer
+            )
 
     web_answer = st.session_state.get(
         "troubleshooting_web_answer"
@@ -1478,36 +1001,6 @@ Do not invent specifications, alarm limits, procedures, component locations, mea
         )
 
         st.write(web_answer)
-
-    # --------------------------------------------------------
-    # DOWNLOADABLE STEP-BY-STEP TROUBLESHOOTING PDF
-    # --------------------------------------------------------
-    final_manual_answer = st.session_state.get("troubleshooting_answer")
-    final_web_answer = st.session_state.get("troubleshooting_web_answer")
-    if final_manual_answer or final_web_answer:
-        try:
-            troubleshooting_pdf = make_troubleshooting_pdf(
-                case=case,
-                manual_answer=final_manual_answer,
-                sources=relevant,
-                web_answer=final_web_answer,
-                web_sources=st.session_state.get("troubleshooting_web_sources", []),
-            )
-            filename_model = re.sub(
-                r"[^A-Za-z0-9_-]+",
-                "_",
-                case.get("engine_model", "engine"),
-            ).strip("_") or "engine"
-            st.download_button(
-                "Download Step-by-Step Troubleshooting PDF",
-                data=troubleshooting_pdf,
-                file_name=f"MarineWise_Troubleshooting_{filename_model}.pdf",
-                mime="application/pdf",
-                type="primary",
-                key="download_troubleshooting_pdf",
-            )
-        except Exception as exc:
-            st.error(f"Could not create the troubleshooting PDF: {exc}")
 
 
 # ============================================================
@@ -1761,254 +1254,13 @@ def make_process_diagram(
     return buffer.getvalue()
 
 
-def make_topic_plan_visual(
-    engine: str,
-    topic: str,
-    plan: list[dict[str, Any]] | None = None,
-) -> bytes:
-    """Create a topic-aware technical schematic, not a generic architecture card grid.
-
-    Priority:
-      1) classify the requested topic into a marine-system diagram family;
-      2) use source-grounded plan text to enrich labels where possible;
-      3) fall back to a plan-driven process diagram for unfamiliar topics.
-
-    The diagram is deliberately conceptual unless an actual manual figure is supplied
-    elsewhere by the app. It must not invent manufacturer-specific component details.
-    """
-    from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
-    import matplotlib.pyplot as plt
-
-    topic_clean = clean_output_text(topic) or "Technical Training Topic"
-    engine_clean = clean_output_text(engine) or "Marine Engine"
-    topic_l = topic_clean.lower()
-
-    # Collect source-grounded plan terms. These are used only as supporting labels;
-    # the system-flow itself is selected from the topic family so the visual is meaningful.
-    plan_items: list[dict[str, Any]] = []
-    for raw in plan or []:
-        if not isinstance(raw, dict):
-            continue
-        title = clean_output_text(raw.get("title", ""))
-        bullets = raw.get("bullets", [])
-        if not isinstance(bullets, list):
-            bullets = [bullets]
-        bullets_clean = [
-            clean_output_text(b) for b in bullets if clean_output_text(b)
-        ]
-        if title:
-            plan_items.append({"title": title, "bullets": bullets_clean})
-
-    def has(*words: str) -> bool:
-        return any(w in topic_l for w in words)
-
-    # Topic-specific marine system families.
-    if has("exhaust", "aftertreatment", "after-treatment", "silencer", "emission"):
-        family = "Exhaust Gas Path"
-        nodes = [
-            ("Engine Cylinders", "Exhaust gas generated"),
-            ("Exhaust Manifold", "Collects exhaust flow"),
-            ("Turbocharger Turbine", "Uses exhaust energy"),
-            ("Exhaust Treatment / Silencer", "Noise / emissions control where fitted"),
-            ("Exhaust Outlet / Stack", "Discharge to atmosphere"),
-        ]
-    elif has("fuel", "injection", "injector", "fuel oil", "diesel supply"):
-        family = "Fuel Supply & Injection Path"
-        nodes = [
-            ("Fuel Source / Tank", "Stored fuel"),
-            ("Strainer / Filter", "Removes contaminants"),
-            ("Fuel Supply", "Delivers fuel to engine"),
-            ("Injection Equipment", "Meters / injects fuel"),
-            ("Cylinders", "Fuel combustion"),
-            ("Return / Recirculation", "Returns excess fuel where applicable"),
-        ]
-    elif has("cooling", "jacket water", "fresh water", "sea water", "seawater", "heat exchanger"):
-        family = "Cooling Circuit"
-        nodes = [
-            ("Cooling Source", "Cooling medium enters circuit"),
-            ("Pump", "Circulates cooling medium"),
-            ("Heat Exchanger / Cooler", "Transfers heat"),
-            ("Engine Cooling Circuit", "Removes engine heat"),
-            ("Temperature Control", "Controls operating temperature"),
-            ("Return", "Cooling medium returns to circuit"),
-        ]
-    elif has("lubric", "lube oil", "lubrication oil", "oil system", "oil filter"):
-        family = "Lubricating Oil Circuit"
-        nodes = [
-            ("Oil Sump / Tank", "Lubricant reservoir"),
-            ("Lube Oil Pump", "Builds circulation flow"),
-            ("Filter", "Removes contaminants"),
-            ("Oil Cooler", "Controls oil temperature where fitted"),
-            ("Engine Lubrication Points", "Lubricates moving components"),
-            ("Return", "Oil drains back to reservoir"),
-        ]
-    elif has("turbocharger", "turbo charger", "boost", "charge air", "charge-air"):
-        family = "Turbocharging & Charge-Air Path"
-        nodes = [
-            ("Exhaust Gas", "Energy source"),
-            ("Turbine", "Converts exhaust energy"),
-            ("Common Shaft", "Transfers rotational energy"),
-            ("Compressor", "Compresses intake air"),
-            ("Charge-Air Cooler", "Cools compressed air where fitted"),
-            ("Engine Intake", "Supplies combustion air"),
-        ]
-    elif has("starting", "starter", "start system", "cranking"):
-        family = "Engine Starting Sequence"
-        nodes = [
-            ("Starting Source", "Electrical / pneumatic source as documented"),
-            ("Start Control", "Initiates starting sequence"),
-            ("Starter", "Applies cranking torque"),
-            ("Flywheel / Crankshaft", "Turns engine"),
-            ("Fuel + Air Enable", "Supports engine firing"),
-            ("Engine Running", "Starting sequence completes"),
-        ]
-    elif has("electrical", "alternator", "generator", "charging", "battery", "switchboard"):
-        family = "Electrical / Charging Path"
-        nodes = [
-            ("Prime Mover", "Mechanical input"),
-            ("Alternator / Generator", "Produces electrical power"),
-            ("Regulation / Protection", "Controls and protects output"),
-            ("Battery / Switchboard", "Stores or distributes power"),
-            ("Electrical Loads", "Consume generated power"),
-            ("Feedback / Monitoring", "Voltage / current / alarms"),
-        ]
-    elif has("governor", "speed control", "engine control", "ecu", "control system", "automation"):
-        family = "Engine Control & Feedback"
-        nodes = [
-            ("Speed / Load Demand", "Operating demand"),
-            ("Controller / Governor", "Processes demand"),
-            ("Actuator", "Commands engine response"),
-            ("Fuel / Engine Response", "Changes engine output"),
-            ("Speed / Load Feedback", "Measures actual response"),
-            ("Control Correction", "Closes the control loop"),
-        ]
-    elif has("air intake", "intake air", "air filter", "induction"):
-        family = "Engine Air Intake Path"
-        nodes = [
-            ("Ambient Air", "Intake air source"),
-            ("Air Filter", "Removes contaminants"),
-            ("Compressor / Turbocharger", "Raises intake pressure where fitted"),
-            ("Charge-Air Cooler", "Controls charge-air temperature where fitted"),
-            ("Intake Manifold", "Distributes air"),
-            ("Engine Cylinders", "Combustion air enters cylinders"),
-        ]
-    else:
-        # Unknown topic: derive a genuine flow from the plan instead of using
-        # a universal INPUT -> CONTROL -> ENGINE -> MONITOR architecture.
-        family = f"{topic_clean} — Technical Process"
-        candidates = []
-        for item in plan_items:
-            title = item["title"]
-            if title not in [x[0] for x in candidates]:
-                candidates.append((title, "Source-grounded training stage"))
-        nodes = candidates[:6]
-        if len(nodes) < 4:
-            nodes = [
-                (f"{topic_clean} — Function", "Purpose and operating role"),
-                (f"{topic_clean} — Components", "Main components documented in source"),
-                (f"{topic_clean} — Operation", "Normal operating sequence"),
-                (f"{topic_clean} — Verification", "Technician checks and indications"),
-                (f"{topic_clean} — Faults", "Documented fault / diagnosis path"),
-            ]
-
-    # Compact long labels while preserving the actual technical wording.
-    nodes = nodes[:6]
-
-    fig, ax = plt.subplots(figsize=(13.33, 6.2))
-    ax.set_xlim(0, 13.33)
-    ax.set_ylim(0, 6.2)
-    ax.axis("off")
-
-    ax.text(
-        6.665, 5.72, f"{engine_clean} — {topic_clean}",
-        ha="center", va="center", fontsize=18, fontweight="bold",
-    )
-    ax.text(
-        6.665, 5.30, family,
-        ha="center", va="center", fontsize=10, fontweight="bold",
-    )
-    ax.text(
-        6.665, 5.00,
-        "Conceptual training schematic — verify component arrangement against the supplied manual",
-        ha="center", va="center", fontsize=8.5,
-    )
-
-    n = len(nodes)
-    card_w = 1.85 if n >= 6 else 2.05
-    card_h = 1.45
-    gap = 0.28
-    total_w = n * card_w + (n - 1) * gap
-    start_x = (13.33 - total_w) / 2
-    y = 2.65
-
-    # Use the plan to provide a small evidence note, without replacing the system flow.
-    plan_text = ""
-    if plan_items:
-        relevant = plan_items[0]["title"]
-        plan_text = f"Training plan: {relevant}"
-
-    for i, (title, desc) in enumerate(nodes):
-        x = start_x + i * (card_w + gap)
-        patch = FancyBboxPatch(
-            (x, y), card_w, card_h,
-            boxstyle="round,pad=0.06,rounding_size=0.08",
-            linewidth=1.5,
-        )
-        ax.add_patch(patch)
-        ax.text(
-            x + card_w / 2, y + 0.98,
-            textwrap.fill(clean_output_text(title), width=20),
-            ha="center", va="center", fontsize=9.8, fontweight="bold",
-        )
-        ax.text(
-            x + card_w / 2, y + 0.38,
-            textwrap.fill(clean_output_text(desc), width=24),
-            ha="center", va="center", fontsize=7.6,
-        )
-
-        if i < n - 1:
-            x1 = x + card_w + 0.02
-            x2 = x + card_w + gap - 0.02
-            arrow = FancyArrowPatch(
-                (x1, y + card_h / 2),
-                (x2, y + card_h / 2),
-                arrowstyle="-|>",
-                mutation_scale=13,
-                linewidth=1.4,
-            )
-            ax.add_patch(arrow)
-
-    # A restrained evidence footer makes it clear this is a training schematic,
-    # while the actual manual figure (when available) remains the preferred visual.
-    ax.text(
-        0.55, 0.55,
-        "Source priority: relevant manual figure/page first; this schematic is used only when a suitable figure is unavailable.",
-        ha="left", va="center", fontsize=7.6,
-    )
-    if plan_text:
-        ax.text(
-            12.78, 0.55,
-            textwrap.fill(plan_text, width=34),
-            ha="right", va="center", fontsize=7.2,
-        )
-
-    buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", dpi=180, bbox_inches="tight")
-    plt.close(fig)
-    return buffer.getvalue()
-
 def make_training_diagram(
     engine: str,
     topic: str,
-    plan: list[dict[str, Any]] | None = None,
 ) -> bytes:
-    # Use the real topic/presentation plan. The legacy fixed
-    # architecture is retained above only for backward compatibility
-    # with any other internal caller, but is no longer used here.
-    return make_topic_plan_visual(
+    return make_system_diagram(
         engine,
         topic,
-        plan,
     )
 
 
@@ -2366,7 +1618,6 @@ def add_picture_card(
     p = title_box.text_frame.paragraphs[0]
 
     p.text = title[:75]
-    p.font.name = "Times New Roman"
     p.font.bold = True
     p.font.size = Pt(10)
     p.font.color.rgb = RGBColor.from_string(
@@ -2383,7 +1634,6 @@ def add_picture_card(
     cp = caption_box.text_frame.paragraphs[0]
 
     cp.text = caption[:110]
-    cp.font.name = "Times New Roman"
     cp.font.size = Pt(7)
     cp.font.color.rgb = RGBColor.from_string(
         GRAY
@@ -2598,238 +1848,882 @@ def make_professional_training_ppt(
     sources: list[dict[str, Any]],
     web_sources: list[dict[str, Any]],
 ) -> bytes:
-    """Build a topic-grounded, professional 16:9 PowerPoint.
-
-    The renderer deliberately uses the AI presentation plan instead of a
-    hard-coded architecture. Manual visuals are consumed first and different
-    manual pages are distributed across the deck before online images are used.
+    """
+    Build a professional 16:9 training presentation.
     """
     from pptx import Presentation
     from pptx.dml.color import RGBColor
-    from pptx.enum.shapes import MSO_SHAPE
-    from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+    from pptx.enum.text import PP_ALIGN
     from pptx.util import Inches, Pt
 
     prs = Presentation()
+
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
 
-    normalized_plan = [item for item in (plan or []) if isinstance(item, dict)]
-    if not normalized_plan:
-        normalized_plan = [
-            {
-                "title": "System Overview",
-                "purpose": "Explain the requested technical topic.",
-                "bullets": [topic],
-                "visual_type": "process_diagram",
-                "visual_query": topic,
-                "source_preference": "manual_first",
-            }
-        ]
-
-    # Keep the requested 8–10 slide structure when the planner returns enough
-    # information; never pad a topic with unrelated generic systems.
-    deck_plan = normalized_plan[:9]
-    fallback_titles = [
-        ("Topic Summary", "Summarize the requested topic.", "summary"),
-        ("Technician Checks", "Apply the source-supported inspection logic.", "checklist"),
-        ("Knowledge Check", "Reinforce the topic-specific learning points.", "questions"),
-        ("References", "Show the evidence used for this presentation.", "references"),
-    ]
-    fallback_index = 0
-    while len(deck_plan) < 8:
-        title, purpose, visual = fallback_titles[min(fallback_index, len(fallback_titles) - 1)]
-        deck_plan.append({
-            "title": title,
-            "purpose": purpose,
-            "bullets": [
-                clean_output_text(topic),
-                "Use the cited source material for the detailed technical explanation.",
-                "Do not substitute generic information for manufacturer-specific instructions.",
-            ],
-            "visual_type": visual,
-            "source_preference": "all_sources" if visual == "references" else "manual_first",
-        })
-        fallback_index += 1
-    deck_plan = deck_plan[:9]
-
-    manual_pool = [x for x in (manual_images or []) if x.get("bytes")]
-    online_pool = [x for x in (online_images or []) if x.get("bytes")]
-    image_pool = manual_pool + online_pool
-    image_index = 0
-
-    def next_image(prefer_manual: bool = True):
-        nonlocal image_index
-        if image_index < len(image_pool):
-            item = image_pool[image_index]
-            image_index += 1
-            return item
-        if prefer_manual and manual_pool:
-            # Reuse only after every distinct manual visual has been used.
-            return manual_pool[0]
-        return None
-
-    def add_header(slide, title: str, section: str, number: int):
-        add_slide_background(slide, LIGHT)
-        add_top_bar(slide, clean_output_text(title)[:100], clean_output_text(section)[:28])
-        add_footer(
-            slide,
-            number,
-            f"{engine} | {topic} | Manual-first technical training",
-        )
-
-    def add_source_badge(slide, item, left=9.0, top=5.85, width=3.6):
-        if not item:
-            return
-        source = clean_output_text(item.get("source"))
-        page = item.get("page")
-        if source:
-            caption = f"Manual: {source} — page {page}"
-        else:
-            caption = clean_output_text(item.get("title")) or "Web technical image"
-        _add_ppt_text_box(
-            slide,
-            caption,
-            left,
-            top,
-            width,
-            0.55,
-            font_size=8,
-            color=GRAY,
-            align=2,
-        )
-
     # --------------------------------------------------------
-    # TITLE SLIDE
+    # TITLE
     # --------------------------------------------------------
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    add_slide_background(slide, NAVY)
 
-    accent = slide.shapes.add_shape(
-        MSO_SHAPE.RECTANGLE,
-        Inches(0.7), Inches(1.0), Inches(1.6), Inches(0.12)
+    slide = prs.slides.add_slide(
+        prs.slide_layouts[6]
     )
+
+    add_slide_background(
+        slide,
+        NAVY,
+    )
+
+    # Accent line
+    accent = slide.shapes.add_shape(
+        1,
+        Inches(0.7),
+        Inches(1.0),
+        Inches(1.5),
+        Inches(0.12),
+    )
+
     accent.fill.solid()
-    accent.fill.fore_color.rgb = RGBColor.from_string(TEAL)
+    accent.fill.fore_color.rgb = RGBColor.from_string(
+        TEAL
+    )
     accent.line.fill.background()
 
-    _add_ppt_text_box(
-        slide, clean_output_text(topic), 0.7, 1.45, 11.8, 1.45,
-        font_size=34, bold=True, color=WHITE
+    title_box = slide.shapes.add_textbox(
+        Inches(0.7),
+        Inches(1.45),
+        Inches(11.7),
+        Inches(1.5),
     )
-    _add_ppt_text_box(
+
+    p = title_box.text_frame.paragraphs[0]
+
+    p.text = topic
+    p.font.size = Pt(38)
+    p.font.bold = True
+    p.font.color.rgb = RGBColor.from_string(
+        WHITE
+    )
+
+    subtitle = slide.shapes.add_textbox(
+        Inches(0.75),
+        Inches(3.15),
+        Inches(10.8),
+        Inches(1.2),
+    )
+
+    p = subtitle.text_frame.paragraphs[0]
+
+    p.text = (
+        f"{engine}"
+        + (
+            f"  |  {ship}"
+            if ship
+            else ""
+        )
+    )
+
+    p.font.size = Pt(22)
+    p.font.color.rgb = RGBColor.from_string(
+        "C9D9E6"
+    )
+
+    tag = slide.shapes.add_textbox(
+        Inches(0.75),
+        Inches(5.5),
+        Inches(7),
+        Inches(0.5),
+    )
+
+    p = tag.text_frame.paragraphs[0]
+
+    p.text = (
+        "MarineWise AI • Technical Training"
+    )
+
+    p.font.size = Pt(12)
+    p.font.bold = True
+    p.font.color.rgb = RGBColor.from_string(
+        "9CCFD2"
+    )
+
+    add_footer(
         slide,
-        clean_output_text(f"{engine}" + (f"  |  {ship}" if ship else "")),
-        0.75, 3.05, 11.0, 0.8,
-        font_size=20, color="C9D9E6"
+        1,
+        "Generated from supplied manuals and technical research.",
     )
-    _add_ppt_text_box(
-        slide,
-        "MarineWise AI • Technical Training • Manual-first evidence",
-        0.75, 5.55, 8.5, 0.55,
-        font_size=12, bold=True, color="9CCFD2"
-    )
-    add_footer(slide, 1, "Primary source: supplied manuals. Secondary source: reliable technical web research.")
 
     # --------------------------------------------------------
-    # CONTENT SLIDES: driven by the actual plan
+    # OBJECTIVES
     # --------------------------------------------------------
-    for slide_no, item in enumerate(deck_plan, start=2):
-        slide = prs.slides.add_slide(prs.slide_layouts[6])
-        title = clean_output_text(item.get("title") or f"{topic} — Section {slide_no - 1}")
-        purpose = clean_output_text(item.get("purpose"))
-        bullets = item.get("bullets", [])
-        if not isinstance(bullets, list):
-            bullets = [bullets]
-        bullets = [clean_output_text(x) for x in bullets if clean_output_text(x)]
-        visual_type = clean_output_text(item.get("visual_type")).lower()
 
-        add_header(slide, title, visual_type or "Training", slide_no)
+    slide = prs.slides.add_slide(
+        prs.slide_layouts[6]
+    )
 
-        # Choose visuals by topic/slide purpose, not one fixed architecture.
-        wants_visual = visual_type not in {"none", "objectives", "questions", "references"}
-        visual_item = next_image() if wants_visual else None
+    add_slide_background(
+        slide
+    )
 
-        if visual_item:
-            add_picture_card(
-                slide,
-                visual_item["bytes"],
-                clean_output_text(visual_item.get("title")) or "Technical reference",
-                (
-                    f"{clean_output_text(visual_item.get('source'))} — page {visual_item.get('page')}"
-                    if visual_item.get("source")
-                    else clean_output_text(visual_item.get("title")) or "Online technical image"
+    add_top_bar(
+        slide,
+        "Learning Objectives",
+        "Training",
+    )
+
+    objectives = [
+        "Understand the purpose of the system.",
+        "Identify the major components and their roles.",
+        "Trace the basic operating sequence.",
+        "Recognize common technician checks and fault symptoms.",
+        "Apply safe inspection and verification practices.",
+    ]
+
+    add_bullets(
+        slide,
+        objectives,
+        left=0.85,
+        top=1.55,
+        width=11.4,
+        height=4.9,
+        font_size=20,
+    )
+
+    add_footer(
+        slide,
+        2,
+        f"{engine} • {topic}",
+    )
+
+    # --------------------------------------------------------
+    # SYSTEM OVERVIEW
+    # --------------------------------------------------------
+
+    slide = prs.slides.add_slide(
+        prs.slide_layouts[6]
+    )
+
+    add_slide_background(
+        slide
+    )
+
+    add_top_bar(
+        slide,
+        "System Overview",
+        "Understand",
+    )
+
+    if manual_images:
+        image = manual_images[0]
+
+        add_picture_card(
+            slide,
+            image["bytes"],
+            "Manual reference",
+            (
+                f"{image['source']} — "
+                f"page {image['page']}"
+            ),
+            0.7,
+            1.35,
+            7.1,
+            5.15,
+        )
+
+        add_callout(
+            slide,
+            "Technician focus",
+            (
+                "Use the manual illustration to identify "
+                "components before beginning inspection "
+                "or troubleshooting."
+            ),
+            8.15,
+            1.55,
+            4.3,
+            1.6,
+        )
+
+        add_callout(
+            slide,
+            "Source",
+            (
+                f"{image['source']} — "
+                f"page {image['page']}"
+            ),
+            8.15,
+            3.55,
+            4.3,
+            1.2,
+        )
+
+    else:
+        diagram = make_system_diagram(
+            engine,
+            topic,
+        )
+
+        add_picture_contain(
+            slide,
+            diagram,
+            0.7,
+            1.25,
+            11.9,
+            4.9,
+        )
+
+    add_footer(
+        slide,
+        3,
+        (
+            f"Manual visual: "
+            f"{manual_images[0]['source']} "
+            f"page {manual_images[0]['page']}"
+            if manual_images
+            else "Generated technical overview diagram."
+        ),
+    )
+
+    # --------------------------------------------------------
+    # PROCESS / HOW IT WORKS
+    # --------------------------------------------------------
+
+    slide = prs.slides.add_slide(
+        prs.slide_layouts[6]
+    )
+
+    add_slide_background(
+        slide
+    )
+
+    add_top_bar(
+        slide,
+        "How the System Works",
+        "Principle",
+    )
+
+    process_steps = [
+        "Input / supply",
+        "Control / regulation",
+        "Engine operation",
+        "Sensor feedback",
+        "Monitoring / alarm",
+    ]
+
+    # Use AI plan information if available
+    for item in plan:
+        visual_type = safe_text(
+            item.get("visual_type")
+        ).lower()
+
+        if visual_type in {
+            "process",
+            "flow",
+            "flowchart",
+            "diagram",
+        }:
+            candidate = item.get(
+                "bullets",
+                [],
+            )
+
+            if isinstance(candidate, list):
+                cleaned = [
+                    safe_text(x)
+                    for x in candidate
+                    if safe_text(x)
+                ]
+
+                if len(cleaned) >= 3:
+                    process_steps = cleaned[:5]
+
+            break
+
+    add_process_shapes(
+        slide,
+        process_steps,
+        left=0.65,
+        top=2.1,
+    )
+
+    add_callout(
+        slide,
+        "Key idea",
+        (
+            "A technician should be able to describe "
+            "what enters the system, what controls it, "
+            "what the engine does with it, and how the "
+            "system reports abnormal conditions."
+        ),
+        1.1,
+        4.25,
+        11.1,
+        1.25,
+    )
+
+    add_footer(
+        slide,
+        4,
+        "Simplified instructional diagram — verify exact architecture against the engine manual.",
+    )
+
+    # --------------------------------------------------------
+    # COMPONENT SPOTLIGHT
+    # --------------------------------------------------------
+
+    slide = prs.slides.add_slide(
+        prs.slide_layouts[6]
+    )
+
+    add_slide_background(
+        slide
+    )
+
+    add_top_bar(
+        slide,
+        "Component Spotlight",
+        "Identify",
+    )
+
+    image_candidates = (
+        manual_images[:2]
+        + online_images[:2]
+    )
+
+    if image_candidates:
+        card_width = 5.75
+
+        for index, item in enumerate(
+            image_candidates[:2]
+        ):
+            left = (
+                0.7
+                if index == 0
+                else 6.85
+            )
+
+            if "bytes" in item:
+                bytes_data = item["bytes"]
+
+                title = (
+                    item.get(
+                        "title",
+                        "Manual reference",
+                    )
+                    or "Technical reference"
+                )
+
+                source = item.get(
+                    "source",
+                    "",
+                )
+
+                if item.get("page"):
+                    source = (
+                        f"{source} — "
+                        f"page {item['page']}"
+                    )
+
+            else:
+                bytes_data = item.get(
+                    "bytes"
+                )
+
+                title = item.get(
+                    "title",
+                    "Online technical image",
+                )
+
+                source = item.get(
+                    "source",
+                    "",
+                )
+
+            if bytes_data:
+                add_picture_card(
+                    slide,
+                    bytes_data,
+                    title,
+                    source,
+                    left,
+                    1.35,
+                    card_width,
+                    4.9,
+                )
+
+    else:
+        add_callout(
+            slide,
+            "No suitable image found",
+            (
+                "The presentation uses clean generated diagrams "
+                "when a reliable manual or web image is unavailable."
+            ),
+            1.0,
+            2.0,
+            11.0,
+            2.0,
+        )
+
+    add_footer(
+        slide,
+        5,
+        "Visuals selected from supplied manuals and technical research where available.",
+    )
+
+    # --------------------------------------------------------
+    # TECHNICIAN CHECKS
+    # --------------------------------------------------------
+
+    slide = prs.slides.add_slide(
+        prs.slide_layouts[6]
+    )
+
+    add_slide_background(
+        slide
+    )
+
+    add_top_bar(
+        slide,
+        "Technician Inspection Sequence",
+        "Practice",
+    )
+
+    checks = [
+        "Confirm the reported symptom and alarm.",
+        "Check the relevant manual section.",
+        "Inspect visible components and connections.",
+        "Measure or verify only with approved procedures.",
+        "Correct the cause and perform a controlled test.",
+    ]
+
+    add_bullets(
+        slide,
+        checks,
+        left=0.8,
+        top=1.35,
+        width=7.1,
+        height=4.9,
+        font_size=17,
+    )
+
+    add_callout(
+        slide,
+        "Before testing",
+        (
+            "Follow the engine manufacturer's isolation, "
+            "PPE, hot-surface, pressure and rotating-equipment "
+            "requirements."
+        ),
+        8.2,
+        1.7,
+        4.0,
+        2.0,
+        "FFF3E6",
+    )
+
+    add_callout(
+        slide,
+        "Record findings",
+        (
+            "Capture measurements, alarm codes, observed "
+            "conditions and the manual page used."
+        ),
+        8.2,
+        4.05,
+        4.0,
+        1.7,
+        LIGHT_TEAL,
+    )
+
+    add_footer(
+        slide,
+        6,
+        "General technician workflow — use the current engine manual for exact procedures.",
+    )
+
+    # --------------------------------------------------------
+    # FAULTS / TROUBLESHOOTING
+    # --------------------------------------------------------
+
+    slide = prs.slides.add_slide(
+        prs.slide_layouts[6]
+    )
+
+    add_slide_background(
+        slide
+    )
+
+    add_top_bar(
+        slide,
+        "Common Fault-Diagnosis Logic",
+        "Troubleshoot",
+    )
+
+    fault_rows = [
+        (
+            "Symptom",
+            "Where to look",
+            "Verify",
+        ),
+        (
+            "Abnormal temperature",
+            "Cooling circuit",
+            "Flow / level / sensor",
+        ),
+        (
+            "Low pressure",
+            "Pump / supply",
+            "Pressure / restriction",
+        ),
+        (
+            "Poor engine response",
+            "Fuel / air / control",
+            "Signals / filters / supply",
+        ),
+        (
+            "Alarm indication",
+            "Sensor / monitored system",
+            "Alarm source and manual procedure",
+        ),
+    ]
+
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.util import Inches, Pt
+
+    start_x = 0.7
+    start_y = 1.35
+    col_widths = [
+        3.7,
+        3.7,
+        4.2,
+    ]
+
+    row_height = 0.85
+
+    for row_index, row in enumerate(
+        fault_rows
+    ):
+        x = start_x
+
+        for col_index, value in enumerate(row):
+            shape = slide.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE,
+                Inches(x),
+                Inches(
+                    start_y
+                    + row_index * row_height
                 ),
-                0.65, 1.28, 6.9, 5.55,
-            )
-            _add_ppt_text_box(
-                slide,
-                purpose or "Evidence-based technical explanation.",
-                7.85, 1.35, 4.75, 0.85,
-                font_size=13, bold=True, color=NAVY,
-            )
-            _add_ppt_bullets(
-                slide,
-                bullets or ["Refer to the supplied source for the detailed procedure."],
-                7.8, 2.25, 4.85, 3.25,
-                font_size=14,
-            )
-            add_source_badge(slide, visual_item, 8.0, 5.8, 4.4)
-        elif visual_type in {"process", "flow", "flowchart", "process_diagram", "diagram"}:
-            steps = bullets[:5] or ["Input", "Control", "Process", "Feedback", "Output"]
-            add_process_shapes(slide, steps, left=0.65, top=2.0)
-            _add_ppt_text_box(
-                slide,
-                purpose or "Trace the topic-specific operating sequence.",
-                0.9, 1.15, 11.5, 0.65,
-                font_size=14, bold=True, color=NAVY, align=1,
-            )
-        elif visual_type == "references":
-            refs = _source_lines(sources, web_sources)
-            _add_ppt_bullets(
-                slide,
-                refs or ["No source records were returned."],
-                0.75, 1.35, 11.8, 5.3,
-                font_size=13,
-            )
-        else:
-            _add_ppt_text_box(
-                slide,
-                purpose or "Technical training content",
-                0.8, 1.3, 11.7, 0.75,
-                font_size=15, bold=True, color=NAVY,
-            )
-            _add_ppt_bullets(
-                slide,
-                bullets or ["Use the cited source material for the topic-specific details."],
-                0.8, 2.15, 11.6, 4.15,
-                font_size=15,
+                Inches(
+                    col_widths[col_index]
+                ),
+                Inches(row_height),
             )
 
-        # Add a compact source strip on every slide so the deck never loses
-        # provenance when a user exports or prints individual slides.
-        source_hint = clean_output_text(item.get("source_preference"))
-        if source_hint:
-            _add_ppt_text_box(
-                slide,
-                f"Evidence mode: {source_hint}",
-                0.65, 6.72, 5.0, 0.25,
-                font_size=7, color=GRAY,
+            shape.fill.solid()
+
+            shape.fill.fore_color.rgb = (
+                RGBColor.from_string(
+                    NAVY
+                    if row_index == 0
+                    else WHITE
+                )
             )
 
+            shape.line.color.rgb = (
+                RGBColor.from_string(
+                    LIGHT_GRAY
+                )
+            )
+
+            tf = shape.text_frame
+            tf.clear()
+
+            p = tf.paragraphs[0]
+            p.text = value
+            p.font.size = Pt(
+                12
+                if row_index
+                else 13
+            )
+            p.font.bold = (
+                row_index == 0
+            )
+
+            p.font.color.rgb = (
+                RGBColor.from_string(
+                    WHITE
+                    if row_index == 0
+                    else DARK
+                )
+            )
+
+            p.alignment = 1
+
+            x += col_widths[col_index]
+
+    add_callout(
+        slide,
+        "Important",
+        (
+            "The table is a training framework, not a substitute "
+            "for manufacturer-specific fault trees."
+        ),
+        1.0,
+        6.0,
+        11.0,
+        0.75,
+        "FFF3E6",
+    )
+
+    add_footer(
+        slide,
+        7,
+        "Use manufacturer fault-finding procedures and specified measurements.",
+    )
+
     # --------------------------------------------------------
-    # FINAL SOURCE SLIDE
+    # SAFETY
     # --------------------------------------------------------
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    add_header(slide, "References & Source Traceability", "Sources", len(prs.slides) + 1)
-    refs = _source_lines(sources, web_sources)
-    if not refs:
-        refs = ["No external source records were returned.", "Verify all technical details against the current manufacturer manual."]
-    _add_ppt_bullets(slide, refs[:12], 0.7, 1.25, 11.9, 5.55, font_size=11)
+
+    slide = prs.slides.add_slide(
+        prs.slide_layouts[6]
+    )
+
+    add_slide_background(
+        slide
+    )
+
+    add_top_bar(
+        slide,
+        "Safety Before Maintenance",
+        "Safety",
+    )
+
+    safety_points = [
+        "Apply the required isolation / lockout procedure.",
+        "Treat hot coolant, oil and engine surfaces as hazardous.",
+        "Beware of pressurized systems and rotating machinery.",
+        "Use appropriate PPE and approved test equipment.",
+        "Follow the current manufacturer safety instructions.",
+    ]
+
+    add_bullets(
+        slide,
+        safety_points,
+        left=0.8,
+        top=1.4,
+        width=7.5,
+        height=4.8,
+        font_size=17,
+    )
+
+    add_callout(
+        slide,
+        "STOP",
+        (
+            "Do not begin a maintenance procedure when the "
+            "equipment state, isolation status or safe procedure "
+            "is uncertain."
+        ),
+        8.65,
+        2.0,
+        3.6,
+        2.0,
+        "FFF1F1",
+    )
+
+    add_footer(
+        slide,
+        8,
+        "Safety guidance must be checked against the current engine and vessel procedures.",
+    )
+
+    # --------------------------------------------------------
+    # KNOWLEDGE CHECK
+    # --------------------------------------------------------
+
+    slide = prs.slides.add_slide(
+        prs.slide_layouts[6]
+    )
+
+    add_slide_background(
+        slide
+    )
+
+    add_top_bar(
+        slide,
+        "Technician Knowledge Check",
+        "Assess",
+    )
+
+    questions = [
+        "1. What is the primary purpose of the system?",
+        "2. Which component should be checked first for the reported symptom?",
+        "3. What measurement or observation confirms the suspected condition?",
+        "4. What safety precaution must be completed before inspection?",
+    ]
+
+    add_bullets(
+        slide,
+        questions,
+        left=0.8,
+        top=1.45,
+        width=11.5,
+        height=4.6,
+        font_size=17,
+    )
+
+    add_callout(
+        slide,
+        "Trainer prompt",
+        (
+            "Ask the technician to explain the reasoning, "
+            "not only give the component name."
+        ),
+        1.1,
+        5.8,
+        11.0,
+        0.8,
+        LIGHT_TEAL,
+    )
+
+    add_footer(
+        slide,
+        9,
+        f"Training topic: {topic}",
+    )
+
+    # --------------------------------------------------------
+    # REFERENCES
+    # --------------------------------------------------------
+
+    slide = prs.slides.add_slide(
+        prs.slide_layouts[6]
+    )
+
+    add_slide_background(
+        slide
+    )
+
+    add_top_bar(
+        slide,
+        "References & Image Credits",
+        "Sources",
+    )
+
+    reference_lines: list[str] = []
+
+    seen_manual: set[str] = set()
+
+    for source in sources:
+        line = (
+            f"Manual: {source.get('source')} "
+            f"— page {source.get('page')}"
+        )
+
+        if line not in seen_manual:
+            seen_manual.add(line)
+            reference_lines.append(line)
+
+    seen_web: set[str] = set()
+
+    for source in web_sources:
+        url = safe_text(
+            source.get("url")
+        )
+
+        title = safe_text(
+            source.get("title")
+        )
+
+        if url and url not in seen_web:
+            seen_web.add(url)
+
+            reference_lines.append(
+                f"Web: {title or 'Technical source'} — {url}"
+            )
+
+    if online_images:
+        for image in online_images:
+            url = safe_text(
+                image.get("url")
+            )
+
+            title = safe_text(
+                image.get("title")
+            )
+
+            if url:
+                reference_lines.append(
+                    "Image: "
+                    f"{title or 'Online technical image'} "
+                    f"— {url}"
+                )
+
+    if not reference_lines:
+        reference_lines = [
+            "No external references were returned.",
+            "Use the current engine manufacturer's manual.",
+        ]
+
+    # Keep reference slide readable.
+    chunks = split_text(
+        "\n".join(
+            f"• {line}"
+            for line in reference_lines
+        ),
+        1700,
+    )
+
+    box = slide.shapes.add_textbox(
+        Inches(0.7),
+        Inches(1.25),
+        Inches(11.9),
+        Inches(5.65),
+    )
+
+    tf = box.text_frame
+    tf.clear()
+
+    for index, chunk in enumerate(
+        chunks[:4]
+    ):
+        p = (
+            tf.paragraphs[0]
+            if index == 0
+            else tf.add_paragraph()
+        )
+
+        p.text = chunk
+        p.font.size = Pt(9)
+        p.font.color.rgb = RGBColor.from_string(
+            DARK
+        )
+
+        p.space_after = Pt(8)
+
+    add_footer(
+        slide,
+        10,
+        "MarineWise AI — verify technical content against current manufacturer documentation.",
+    )
+
+    # --------------------------------------------------------
+    # SAVE
+    # --------------------------------------------------------
 
     output = io.BytesIO()
+
     prs.save(output)
+
     return output.getvalue()
+
+
+# ============================================================
+# TRAINING MATERIAL PAGE
+# ============================================================
 
 
 def training_material_page() -> None:
@@ -2850,34 +2744,19 @@ def training_material_page() -> None:
     with st.form(
         "professional_training_material_form"
     ):
-        # Topic is the primary training input. Engine model and ship are
-        # optional context fields so the Training Agent can also handle
-        # workshop/marine-mechanical topics that are not engine-specific.
-        topic = st.text_input(
-            "Training Topic *",
-            placeholder="Bow Thruster / Shaft Alignment / Propeller / Cooling System",
-            help=(
-                "Enter the technical subject first. This can be an engine topic, "
-                "marine propulsion topic, workshop topic, deck machinery topic, "
-                "or another mechanical training subject."
-            ),
-        )
-
         engine = st.text_input(
-            "Engine Model (Optional)",
+            "Engine Model",
             placeholder="MTU 16V 4000 M90",
-            help=(
-                "Optional. Use this when the training needs to be specific to an "
-                "engine/model. Leave blank for general mechanical or marine topics."
-            ),
         )
 
         ship = st.text_input(
-            "Ship (Optional)",
+            "Ship",
             placeholder="MV Example",
-            help=(
-                "Optional. Use this when the training should be specific to a ship."
-            ),
+        )
+
+        topic = st.text_input(
+            "Training Topic",
+            placeholder="Cooling System",
         )
 
         c1, c2, c3 = st.columns(3)
@@ -2905,20 +2784,11 @@ def training_material_page() -> None:
     if not submitted:
         return
 
-    if not topic.strip():
+    if not engine.strip() or not topic.strip():
         st.warning(
-            "Enter a training topic first. Engine Model and Ship are optional."
+            "Enter an engine model and training topic."
         )
         return
-
-    # Build a clean optional context string. Do not force an engine model into
-    # retrieval, research, prompts, or output when the user leaves it blank.
-    training_context = " ".join(
-        part.strip()
-        for part in [engine, ship]
-        if part and part.strip()
-    )
-    retrieval_prefix = f"{training_context} " if training_context else ""
 
     if not any(
         [
@@ -2945,33 +2815,18 @@ def training_material_page() -> None:
         with st.spinner(
             "Step 1/4 — Searching uploaded manuals..."
         ):
-            primary_results = search_index(
+            results = search_index(
                 rag,
-                f"{retrieval_prefix}{topic} system components operation troubleshooting",
+                f"{engine} {topic}",
                 get_embedder(),
-                k=10,
+                k=8,
             )
-            visual_results = search_index(
-                rag,
-                f"{retrieval_prefix}{topic} diagram schematic architecture components",
-                get_embedder(),
-                k=10,
-            )
-            # Merge both retrieval passes so the deck can use several distinct
-            # manual pages instead of repeatedly showing one architecture page.
-            merged = []
-            seen_keys = set()
-            for item in list(primary_results) + list(visual_results):
-                key = (item.get("source"), item.get("page"), item.get("chunk_id", item.get("text", ""))[:80])
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    merged.append(item)
 
             context, relevant = retrieve_context(
-                merged,
-                min_score=0.25,
-                max_chunks=10,
-                max_chars=9000,
+                results,
+                min_score=0.28,
+                max_chunks=6,
+                max_chars=7000,
             )
 
             st.session_state.last_retrieved = relevant
@@ -3027,17 +2882,6 @@ def training_material_page() -> None:
         [],
     ) or []
 
-    # Source gate: manual evidence is preferred. If no manual evidence exists,
-    # a reliable web result is required before any downloadable technical output
-    # is created. This prevents unsupported model-only technical content.
-    if not context.strip() and not web_sources:
-        st.error(
-            "No usable source evidence was found. Upload/build the manual index "
-            "or configure TAVILY_API_KEY so MarineWise can research reliable "
-            "technical sources before generating PDF/PPT/Word output."
-        )
-        return
-
     image_candidates = unique_image_urls(
         research,
         limit=6,
@@ -3076,119 +2920,18 @@ def training_material_page() -> None:
     with st.spinner(
         "Step 3/4 — Designing the professional presentation..."
     ):
-        if generate_training_presentation_plan is not None:
-            plan_raw = generate_training_presentation_plan(
-                selected_provider(),
-                engine,
-                ship,
-                topic,
-                context,
-                research,
-            )
-            plan = parse_training_plan(plan_raw)
-        else:
-            # Safe local fallback if the optional planner function is unavailable.
-            plan = [
-                {
-                    "title": f"{topic} — System Overview",
-                    "purpose": f"Explain the requested {topic} system using source evidence.",
-                    "bullets": [
-                        f"Purpose and boundaries of {topic}",
-                        f"Major {topic} components supported by the source",
-                        "Relevant interfaces and flow path",
-                    ],
-                    "visual_type": "manual_page",
-                    "visual_query": f"{engine} {topic} system diagram schematic",
-                    "source_preference": "manual_first",
-                },
-                {
-                    "title": f"How {topic} Works",
-                    "purpose": "Explain the topic-specific operating sequence.",
-                    "bullets": [
-                        "Initiating condition / input",
-                        "Main process",
-                        "Control or regulation",
-                        "Feedback / output",
-                    ],
-                    "visual_type": "process_diagram",
-                    "visual_query": f"{engine} {topic} operating sequence flow diagram",
-                    "source_preference": "manual_first",
-                },
-                {
-                    "title": f"{topic} Components",
-                    "purpose": "Identify and explain the relevant components.",
-                    "bullets": [
-                        "Function",
-                        "Operating role",
-                        "Inspection points",
-                    ],
-                    "visual_type": "component_cards",
-                    "visual_query": f"{engine} {topic} components technical diagram",
-                    "source_preference": "manual_first",
-                },
-                {
-                    "title": "Technician Checks",
-                    "purpose": "Provide evidence-supported inspection checks.",
-                    "bullets": [
-                        "Confirm the symptom or condition",
-                        "Inspect relevant components and connections",
-                        "Verify approved measurements",
-                        "Record findings and source page",
-                    ],
-                    "visual_type": "checklist",
-                    "visual_query": f"{engine} {topic} inspection manual",
-                    "source_preference": "manual_first",
-                },
-                {
-                    "title": f"{topic} Fault Diagnosis",
-                    "purpose": "Connect symptoms to evidence-supported verification.",
-                    "bullets": [
-                        "Symptom",
-                        "Relevant area",
-                        "Verification",
-                        "Corrective action where documented",
-                    ],
-                    "visual_type": "diagnostic_flow",
-                    "visual_query": f"{engine} {topic} troubleshooting",
-                    "source_preference": "manual_first",
-                },
-                {
-                    "title": f"{topic} Maintenance & Safety",
-                    "purpose": "Cover only topic-relevant maintenance and safety information.",
-                    "bullets": [
-                        "Isolation / lockout where documented",
-                        "PPE and hazards where documented",
-                        "Maintenance requirements",
-                        "Warnings and limits from the source",
-                    ],
-                    "visual_type": "safety_callout",
-                    "visual_query": f"{engine} {topic} maintenance safety",
-                    "source_preference": "manual_first",
-                },
-                {
-                    "title": f"{topic} Knowledge Check",
-                    "purpose": "Confirm topic-specific understanding.",
-                    "bullets": [
-                        f"What is the normal {topic} sequence?",
-                        f"Which {topic} components require inspection?",
-                        "Which observation confirms the suspected condition?",
-                    ],
-                    "visual_type": "questions",
-                    "visual_query": "",
-                    "source_preference": "manual_first",
-                },
-                {
-                    "title": "References",
-                    "purpose": "Show all evidence used.",
-                    "bullets": [
-                        "Supplied manufacturer manual pages",
-                        "Reliable web sources used for gaps",
-                    ],
-                    "visual_type": "references",
-                    "visual_query": "",
-                    "source_preference": "all_sources",
-                },
-            ]
+        plan_raw = generate_training_presentation_plan(
+            selected_provider(),
+            engine,
+            ship,
+            topic,
+            context,
+            research,
+        )
+
+        plan = parse_training_plan(
+            plan_raw
+        )
 
     # --------------------------------------------------------
     # CONTENT DISPLAY
@@ -3432,31 +3175,21 @@ Keep the material practical and understandable.
     diagram = make_training_diagram(
         engine,
         topic,
-        plan,
     )
 
     st.markdown(
-        "### Topic Visual / Architecture"
+        "### Generated Technical Diagram"
     )
 
-    if manual_images:
-        st.image(
-            manual_images[0]["bytes"],
-            caption=(
-                f"Primary manual visual: {manual_images[0].get('source')} — "
-                f"page {manual_images[0].get('page')}"
-            ),
-            use_container_width=True,
-        )
-    else:
-        st.image(
-            diagram,
-            caption=(
-                "Generated topic-specific training diagram based on the "
-                "presentation plan and source evidence."
-            ),
-            use_container_width=True,
-        )
+    st.image(
+        diagram,
+        caption=(
+            "Simplified training diagram. "
+            "Verify engine-specific architecture "
+            "against the current manual."
+        ),
+        use_container_width=True,
+    )
 
     # --------------------------------------------------------
     # DOWNLOADS
@@ -3490,7 +3223,6 @@ Keep the material practical and understandable.
                 content,
                 relevant,
                 diagram,
-                web_sources,
             ),
             "marinewise_training.pdf",
             "application/pdf",
@@ -3506,8 +3238,6 @@ Keep the material practical and understandable.
                 topic,
                 content,
                 diagram,
-                relevant,
-                web_sources,
             ),
             "marinewise_training.docx",
             (
@@ -3524,18 +3254,29 @@ Keep the material practical and understandable.
 
 
 def quiz_page() -> None:
-    st.subheader("2B. Quiz Generator")
-    st.caption("Generate technician questions and an answer key.")
+    st.subheader(
+        "2B. Quiz Generator"
+    )
+
+    st.caption(
+        "Generate technician questions and an answer key."
+    )
 
     with st.form("quiz_form"):
         topic = st.text_input(
             "Topic",
             placeholder="Fuel Injection System",
         )
+
         qtype = st.selectbox(
             "Type",
-            ["MCQ", "Short Question", "True-False"],
+            [
+                "MCQ",
+                "Short Question",
+                "True-False",
+            ],
         )
+
         count = st.number_input(
             "Number of questions",
             min_value=1,
@@ -3543,6 +3284,7 @@ def quiz_page() -> None:
             value=10,
             step=1,
         )
+
         submitted = st.form_submit_button(
             "Generate Quiz",
             type="primary",
@@ -3550,82 +3292,67 @@ def quiz_page() -> None:
 
     if not submitted:
         return
+
     if not topic.strip():
         st.warning("Enter a topic.")
         return
 
-    rag = st.session_state.get("rag")
+    rag = st.session_state.get(
+        "rag"
+    )
+
     context = ""
     relevant: list[dict[str, Any]] = []
 
     if rag:
-        with st.spinner("Searching manuals first..."):
+        with st.spinner(
+            "Searching manuals first..."
+        ):
             results = search_index(
                 rag,
                 topic,
                 get_embedder(),
-                k=8,
+                k=6,
             )
+
             context, relevant = retrieve_context(
                 results,
-                min_score=0.28,
-                max_chunks=5,
-                max_chars=6500,
+                min_score=0.30,
+                max_chunks=3,
+                max_chars=4000,
             )
 
-    # If the manual does not support the requested topic, use the same reliable
-    # web research path used by 2A instead of silently falling back to model memory.
-    research: dict[str, Any] = {"results": [], "images": []}
-    tavily_key = get_secret("TAVILY_API_KEY")
-    if tavily_key and (not context.strip() or len(context) < 600):
-        with st.spinner("Manual evidence is limited — researching reliable technical sources online..."):
-            research = run_training_web_research(
-                selected_provider(),
-                "",
-                topic,
-                "",
-                context,
-                tavily_key,
-            ) if run_training_web_research is not None else research
-
-    web_sources = research.get("results", []) or []
-
-    if not context.strip() and not web_sources:
-        st.error(
-            "No usable manual evidence or reliable web source was found for this topic. "
-            "Build the manual index or configure TAVILY_API_KEY before generating the quiz."
-        )
-        return
-
-    with st.spinner("Generating quiz and answer key..."):
+    with st.spinner(
+        "Generating quiz and answer key..."
+    ):
         quiz_text = run_agent(
             """
 Create a marine technician training quiz.
 
 Follow the requested question type and count exactly.
+
 Include an ANSWER KEY at the end.
 
-SOURCE PRIORITY:
-1. Supplied manufacturer/manual excerpts are primary.
-2. Reliable web evidence is secondary and may only fill gaps not covered by the manual.
-3. Do not invent manufacturer-specific values, limits, procedures, or component details.
-4. If a detail is not supported by the supplied evidence, phrase the question generically or omit it.
+Use supplied manual excerpts where available.
 
-Make every question directly relevant to the requested topic.
-For MCQ questions, use exactly one correct answer and plausible distractors.
+Do not invent manufacturer-specific values.
 """,
             (
                 f"Topic: {topic}\n"
                 f"Type: {qtype}\n"
                 f"Questions: {count}\n\n"
-                f"PRIMARY MANUAL EXCERPTS:\n{context}\n\n"
-                f"SECONDARY WEB SOURCES:\n{web_sources[:8]}"
+                f"MANUAL EXCERPTS:\n{context}"
             ),
             "training",
         )
 
-    st.markdown("### Quiz")
-    st.write(quiz_text)
+    st.markdown(
+        "### Quiz"
+    )
+
+    st.write(
+        quiz_text
+    )
 
     st.download_button(
         "Download Quiz PDF",
@@ -3633,21 +3360,14 @@ For MCQ questions, use exactly one correct answer and plausible distractors.
             topic,
             qtype,
             quiz_text,
-            relevant,
-            web_sources,
         ),
         "marinewise_quiz.pdf",
         "application/pdf",
     )
 
-    render_sources(relevant)
-    if web_sources:
-        st.markdown("**Secondary web research sources:**")
-        for source in web_sources[:8]:
-            title = safe_text(source.get("title"))
-            url = safe_text(source.get("url"))
-            if title and url:
-                st.markdown(f"- {title}: {url}")
+    render_sources(
+        relevant
+    )
 
 
 # ============================================================
@@ -4803,6 +4523,26 @@ information when they differ or when the manual does not cover a point.
             remedial_content
         )
 
+        diagram = make_training_diagram(
+            engine.strip()
+            or "Marine engine",
+            remedial_topic,
+        )
+
+        st.markdown(
+            "### Targeted Training Diagram"
+        )
+
+        st.image(
+            diagram,
+            caption=(
+                "Training diagram for the identified "
+                "improvement areas. Verify engine-specific "
+                "architecture against the current manual."
+            ),
+            use_container_width=True,
+        )
+
         remedial_plan: list[dict[str, Any]] = []
 
         if generate_training_presentation_plan is not None:
@@ -4881,26 +4621,6 @@ information when they differ or when the manual does not cover a point.
                 },
             ]
 
-        diagram = make_training_diagram(
-            engine.strip()
-            or "Marine engine",
-            remedial_topic,
-            remedial_plan,
-        )
-
-        st.markdown(
-            "### Targeted Training Diagram"
-        )
-
-        st.image(
-            diagram,
-            caption=(
-                "Topic-specific retraining visual based on the identified "
-                "improvement areas and source-grounded training plan."
-            ),
-            use_container_width=True,
-        )
-
         ppt_bytes = (
             make_professional_training_ppt(
                 engine.strip()
@@ -4940,7 +4660,6 @@ information when they differ or when the manual does not cover a point.
                 remedial_content,
                 relevant,
                 diagram,
-                web_sources,
             ),
             "marinewise_targeted_remedial_training.pdf",
             "application/pdf",
@@ -4959,8 +4678,6 @@ information when they differ or when the manual does not cover a point.
                 ),
                 remedial_content,
                 diagram,
-                relevant,
-                web_sources,
             ),
             "marinewise_targeted_remedial_training.docx",
             (
@@ -5262,49 +4979,13 @@ If technician answer marks are not visible in the OCR, say so in FEEDBACK.
         ),
     }
 
+
 # ============================================================
-# MARINE AI COMMAND CENTER
+# PAGE 3 — MARINE AI COMMAND CENTER
 # ============================================================
-
-def _command_center_web_text(
-    research: dict[str, Any],
-) -> str:
-    """
-    Convert approved Tavily results into bounded text
-    for the CrewAI agents.
-    """
-
-    parts = []
-
-    for number, item in enumerate(
-        research.get("results", [])[:10],
-        start=1,
-    ):
-
-        title = safe_text(
-            item.get("title")
-        )
-
-        url = safe_text(
-            item.get("url")
-        )
-
-        content = safe_text(
-            item.get("content")
-        )
-
-        parts.append(
-            f"WEB SOURCE {number}\n"
-            f"Title: {title}\n"
-            f"URL: {url}\n"
-            f"Content: {content}"
-        )
-
-    return "\n\n".join(parts)
 
 
 def marine_ai_command_center_page() -> None:
-
     st.markdown(
         '<div class="main-title">'
         "Marine AI Command Center"
@@ -5314,654 +4995,287 @@ def marine_ai_command_center_page() -> None:
 
     st.markdown(
         '<div class="main-subtitle">'
-        "CrewAI-powered collaboration between specialist marine agents"
+        "CrewAI-powered collaboration between marine technical agents"
         "</div>",
         unsafe_allow_html=True,
     )
 
     st.info(
-        "The Marine AI Command Center is the multi-agent "
-        "orchestration layer of MarineWise. It searches the "
-        "supplied manuals first and then passes evidence between "
-        "specialist CrewAI agents. Online research is never started "
-        "automatically."
+        "The Command Center coordinates specialist agents. "
+        "Manual evidence is reviewed first. Online research is "
+        "performed only after you explicitly request it."
     )
 
-    # ========================================================
-    # AGENT FLOW
-    # ========================================================
-
-    st.markdown(
-        "### CrewAI Agent Workflow"
-    )
-
-    flow_cols = st.columns(5)
-
-    flow = [
-        ("1", "Orchestrator"),
-        ("2", "Evidence Analyst"),
-        ("3", "Web Reviewer"),
-        ("4", "Marine Specialist"),
-        ("5", "Learning Agent"),
-    ]
-
-    for col, (
-        number,
-        label,
-    ) in zip(
-        flow_cols,
-        flow,
-    ):
-
-        col.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-value">{number}</div>
-                <div class="metric-label">{label}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    st.markdown(
-        """
-        <div style="
-            text-align:center;
-            margin:15px 0;
-            font-size:18px;
-            font-weight:600;
-        ">
-            Orchestrator
-            →
-            Evidence Analyst
-            →
-            Marine Specialist
-            →
-            Learning Agent
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.caption(
-        "If approved web evidence is available, the Web Evidence "
-        "Reviewer is inserted between the Evidence Analyst and "
-        "Marine Specialist."
-    )
-
-    # ========================================================
-    # INPUT
-    # ========================================================
-
-    st.markdown(
-        "### 1. Define the Technical Task"
-    )
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-
+    with st.form("marine_ai_command_center_form"):
         topic = st.text_input(
-            "Topic *",
-            placeholder=(
-                "e.g. Bow thruster hydraulic system"
-            ),
-            key="cc_topic",
+            "Topic",
+            placeholder="e.g. Bow thruster hydraulic system",
         )
 
-        engine_model = st.text_input(
-            "Engine / Equipment Model",
-            placeholder="Optional",
-            key="cc_engine",
-        )
+        c1, c2 = st.columns(2)
 
-    with c2:
+        with c1:
+            engine_model = st.text_input(
+                "Engine / Equipment Model (optional)",
+                placeholder="e.g. MTU 16V 4000 M90",
+            )
 
-        ship = st.text_input(
-            "Ship",
-            placeholder="Optional",
-            key="cc_ship",
-        )
+        with c2:
+            ship = st.text_input(
+                "Ship (optional)",
+                placeholder="e.g. Vessel name / class",
+            )
 
         objective = st.text_area(
-            "Command Center Objective",
+            "Technical Objective",
             placeholder=(
-                "What should the agents investigate, explain, "
-                "troubleshoot, or turn into a learning plan?"
+                "What should the Marine AI team investigate, "
+                "explain or prepare?"
             ),
-            height=110,
-            key="cc_objective",
+            height=100,
         )
 
-    # ========================================================
-    # RAG STATUS
-    # ========================================================
-
-    rag = st.session_state.get(
-        "rag"
-    )
-
-    if rag:
-
-        st.success(
-            f"Manual-first RAG is ready: "
-            f"{len(rag['records'])} chunks and "
-            f"{len(rag.get('page_images', {}))} page visuals."
+        submitted = st.form_submit_button(
+            "Start Marine AI Command Center",
+            type="primary",
         )
 
-    else:
-
-        st.warning(
-            "No FAISS manual index is available. "
-            "Build the manual index first for "
-            "source-grounded Command Center results."
+    if not submitted:
+        previous = st.session_state.get(
+            "command_center_result"
         )
-
-    # ========================================================
-    # RUN BUTTON
-    # ========================================================
-
-    run_button = st.button(
-        "Run Marine AI Command Center",
-        type="primary",
-        use_container_width=True,
-        key="cc_run",
-    )
-
-    if run_button:
-
-        if not topic.strip():
-
-            st.warning(
-                "Enter a topic first."
-            )
-
-            return
-
-        context = ""
-        relevant = []
-
-        # ----------------------------------------------------
-        # MANUAL-FIRST RAG
-        # ----------------------------------------------------
-
-        if rag:
-
-            query_parts = [
-                topic.strip()
-            ]
-
-            if engine_model.strip():
-                query_parts.append(
-                    engine_model.strip()
-                )
-
-            if ship.strip():
-                query_parts.append(
-                    ship.strip()
-                )
-
-            query = " ".join(
-                query_parts
-            )
-
-            with st.spinner(
-                "Step 1 — searching the supplied manuals..."
-            ):
-
-                results = search_index(
-                    rag,
-                    query,
-                    get_embedder(),
-                    k=8,
-                )
-
-                context, relevant = (
-                    retrieve_context(
-                        results,
-                        min_score=0.28,
-                        max_chunks=6,
-                        max_chars=7000,
-                    )
-                )
-
-            st.session_state.last_retrieved = (
-                relevant
-            )
-
-        # ----------------------------------------------------
-        # CREWAI
-        # ----------------------------------------------------
-
-        try:
-
-            with st.spinner(
-                "Step 2 — CrewAI agents are collaborating..."
-            ):
-
-                result = run_marine_command_center(
-                    provider=selected_provider(),
-                    topic=topic,
-                    engine_model=engine_model,
-                    ship=ship,
-                    objective=objective,
-                    manual_context=context,
-                    web_context="",
-                    api_key=require_provider_key(),
-                )
-
-            st.session_state.command_center_result = (
-                result
-            )
-
-            st.session_state.command_center_context = (
-                context
-            )
-
-            st.session_state.command_center_sources = (
-                relevant
-            )
-
-            st.session_state.command_center_web = (
-                None
-            )
-
-            st.session_state.command_center_case = {
-                "topic": topic,
-                "engine_model": engine_model,
-                "ship": ship,
-                "objective": objective,
-            }
-
-        except Exception as exc:
-
-            st.error(
-                f"Command Center failed: {exc}"
-            )
-
-            if (
-                "CrewAI is not installed"
-                in str(exc)
-            ):
-
-                st.code(
-                    "pip install -U crewai",
-                    language="bash",
-                )
-
-            return
-
-    # ========================================================
-    # GET RESULT
-    # ========================================================
-
-    result = st.session_state.get(
-        "command_center_result"
-    )
-
-    context = st.session_state.get(
-        "command_center_context",
-        "",
-    )
-
-    sources = st.session_state.get(
-        "command_center_sources",
-        [],
-    )
-
-    web_research = st.session_state.get(
-        "command_center_web"
-    )
-
-    case = st.session_state.get(
-        "command_center_case",
-        {},
-    )
-
-    if not result:
+        if previous:
+            _render_command_center_result(previous)
         return
 
-    # ========================================================
-    # RESULT
-    # ========================================================
+    topic = topic.strip()
+    engine_model = engine_model.strip()
+    ship = ship.strip()
+    objective = objective.strip()
 
-    st.markdown("---")
+    if not topic:
+        st.warning("Please enter a topic.")
+        return
 
-    st.markdown(
-        "### CrewAI Collaboration Result"
-    )
+    rag = st.session_state.get("rag")
 
-    agents_used = result.get(
-        "agent_names",
-        [],
-    )
+    manual_context = ""
+    manual_results: list[dict[str, Any]] = []
 
-    if agents_used:
+    if rag:
+        query_parts = [topic]
+        if engine_model:
+            query_parts.append(engine_model)
+        if ship:
+            query_parts.append(ship)
+        if objective:
+            query_parts.append(objective)
 
-        st.caption(
-            "Agents used: "
-            + " → ".join(
-                agents_used
-            )
-        )
+        query = " ".join(query_parts)
 
-    result_tabs = st.tabs(
-        [
-            "Final Marine Insight",
-            "Agent-to-Agent Handoffs",
-            "Manual Evidence",
-        ]
-    )
-
-    # ========================================================
-    # FINAL RESULT
-    # ========================================================
-
-    with result_tabs[0]:
-
-        st.markdown(
-            result.get(
-                "final",
-                "No final result was returned.",
-            )
-        )
-
-        if result.get(
-            "used_web_evidence"
+        with st.spinner(
+            "Command Center Step 1/5 — searching uploaded manuals..."
         ):
-
-            st.caption(
-                "Approved supplementary web evidence "
-                "was included in this run."
+            results = search_index(
+                rag,
+                query,
+                get_embedder(),
+                k=8,
             )
 
-        else:
-
-            st.caption(
-                "No online research was used in this run."
+            manual_context, manual_results = retrieve_context(
+                results,
+                min_score=0.28,
+                max_chunks=6,
+                max_chars=7000,
             )
 
-    # ========================================================
-    # AGENT HANDOFFS
-    # ========================================================
+            st.session_state.last_retrieved = manual_results
 
-    with result_tabs[1]:
-
-        task_outputs = result.get(
-            "task_outputs",
-            [],
+    else:
+        st.warning(
+            "No FAISS manual index is available. The Command Center "
+            "can still run, but manual grounding will be unavailable."
         )
 
-        if not task_outputs:
+    st.session_state.command_center_case = {
+        "topic": topic,
+        "engine_model": engine_model,
+        "ship": ship,
+        "objective": objective,
+        "manual_context": manual_context,
+        "manual_results": manual_results,
+    }
 
-            st.info(
-                "No individual task outputs were returned."
-            )
+    if manual_results:
+        render_sources(manual_results)
 
-        for index, item in enumerate(
-            task_outputs,
-            start=1,
-        ):
-
-            task_name = item.get(
-                "task",
-                "CrewAI Task",
-            )
-
-            output = item.get(
-                "output",
-                "",
-            )
-
-            with st.expander(
-                f"Agent handoff {index}: {task_name}",
-                expanded=(
-                    index
-                    == len(task_outputs)
-                ),
-            ):
-
-                st.write(
-                    output
-                )
-
-    # ========================================================
-    # MANUAL EVIDENCE
-    # ========================================================
-
-    with result_tabs[2]:
-
-        if sources:
-
-            for source in sources:
-
-                source_name = source.get(
-                    "source",
-                    "Manual",
-                )
-
-                page = source.get(
-                    "page",
-                    "?",
-                )
-
-                st.markdown(
-                    f"**{source_name} — page {page}**"
-                )
-
-                st.write(
-                    source.get(
-                        "text",
-                        "",
-                    )
-                )
-
-        elif context:
-
-            st.write(
-                context
-            )
-
-        else:
-
-            st.warning(
-                "No manual evidence was retrieved."
-            )
-
-    # ========================================================
-    # HUMAN-IN-THE-LOOP WEB FALLBACK
-    # ========================================================
-
-    if not web_research:
-
-        st.markdown("---")
-
-        st.markdown(
-            "### Need Supplementary Online Research?"
+    if manual_context:
+        st.success(
+            "Manual evidence retrieved. The CrewAI team will use "
+            "this evidence as its primary technical source."
+        )
+    else:
+        st.warning(
+            "No sufficiently relevant manual evidence was retrieved. "
+            "You can explicitly request online research below."
         )
 
-        st.write(
-            "The current CrewAI result is based on the "
-            "supplied manual evidence. If the agents "
-            "identified an evidence gap, you can explicitly "
-            "approve Tavily research here."
-        )
+    # --------------------------------------------------------
+    # HUMAN-IN-THE-LOOP WEB RESEARCH
+    # --------------------------------------------------------
 
-        tavily_key = get_secret(
-            "TAVILY_API_KEY"
-        )
+    st.markdown("### Optional Online Research")
+
+    st.write(
+        "Online research is not automatic. Click the button below "
+        "only if you want the Command Center to use Tavily."
+    )
+
+    web_search_requested = st.button(
+        "Search Online with Tavily",
+        key="command_center_web_search",
+    )
+
+    web_context = ""
+
+    if web_search_requested:
+        tavily_key = get_secret("TAVILY_API_KEY")
 
         if not tavily_key:
+            st.error(
+                "TAVILY_API_KEY is not configured. Add it to "
+                "Streamlit Secrets or environment variables."
+            )
+        else:
+            search_query = topic
 
-            st.caption(
-                "TAVILY_API_KEY is not configured, "
-                "so online research is unavailable."
+            if engine_model:
+                search_query += f" {engine_model}"
+
+            if ship:
+                search_query += f" {ship}"
+
+            if objective:
+                search_query += f" {objective}"
+
+            with st.spinner(
+                "Command Center Step 2/5 — searching approved online sources..."
+            ):
+                web_answer = ask_web(
+                    """
+You are the MarineWise approved web research specialist.
+
+Research the supplied marine technical topic using reliable,
+relevant technical sources.
+
+Rules:
+- Do not invent facts.
+- Clearly distinguish web information from manufacturer manual evidence.
+- Prefer manufacturer, classification, regulatory, OEM and authoritative
+  technical sources where available.
+- Include source titles and URLs when available.
+- Do not present general web information as a vessel-specific procedure.
+""",
+                    (
+                        f"TOPIC: {topic}\n"
+                        f"ENGINE / EQUIPMENT MODEL: {engine_model or 'Not provided'}\n"
+                        f"SHIP: {ship or 'Not provided'}\n"
+                        f"OBJECTIVE: {objective or 'Technical investigation'}\n\n"
+                        f"MANUAL EVIDENCE ALREADY RETRIEVED:\n"
+                        f"{manual_context or '[None]'}\n\n"
+                        f"ONLINE RESEARCH QUERY:\n{search_query}"
+                    ),
+                )
+
+                web_context = web_answer
+                st.session_state.command_center_web_context = web_context
+
+            st.success(
+                "Approved web research has been added as supplementary evidence."
             )
 
-        elif st.button(
-            "Yes — Search Online with Tavily",
-            key="cc_approve_web",
-        ):
-
-            try:
-
-                with st.spinner(
-                    "Searching approved supplementary sources..."
-                ):
-
-                    research = (
-                        run_training_web_research(
-                            provider=selected_provider(),
-                            engine=case.get(
-                                "engine_model",
-                                "",
-                            ),
-                            topic=case.get(
-                                "topic",
-                                "",
-                            ),
-                            ship=case.get(
-                                "ship",
-                                "",
-                            ),
-                            manual_context=context,
-                            tavily_api_key=tavily_key,
-                        )
-                    )
-
-                web_text = (
-                    _command_center_web_text(
-                        research
-                    )
-                )
-
-                st.session_state.command_center_web = (
-                    research
-                )
-
-                if not web_text:
-
-                    st.warning(
-                        "No web evidence was returned. "
-                        "The manual-only result remains available."
-                    )
-
-                else:
-
-                    with st.spinner(
-                        "Passing approved web evidence "
-                        "to the CrewAI team..."
-                    ):
-
-                        updated = (
-                            run_marine_command_center(
-                                provider=selected_provider(),
-                                topic=case.get(
-                                    "topic",
-                                    "",
-                                ),
-                                engine_model=case.get(
-                                    "engine_model",
-                                    "",
-                                ),
-                                ship=case.get(
-                                    "ship",
-                                    "",
-                                ),
-                                objective=case.get(
-                                    "objective",
-                                    "",
-                                ),
-                                manual_context=context,
-                                web_context=web_text,
-                                api_key=require_provider_key(),
-                            )
-                        )
-
-                    st.session_state.command_center_result = (
-                        updated
-                    )
-
-                    st.rerun()
-
-            except Exception as exc:
-
-                st.error(
-                    f"Approved web research failed: {exc}"
-                )
-
-    # ========================================================
-    # APPROVED WEB SOURCES
-    # ========================================================
-
-    if web_research:
-
-        st.markdown(
-            "### Approved Supplementary Web Evidence"
+    else:
+        web_context = st.session_state.get(
+            "command_center_web_context",
+            "",
         )
 
-        for item in web_research.get(
-            "results",
-            [],
-        )[:8]:
+    # --------------------------------------------------------
+    # CREWAI EXECUTION
+    # --------------------------------------------------------
 
-            title = (
-                safe_text(
-                    item.get(
-                        "title"
-                    )
-                )
-                or "Web source"
-            )
-
-            url = safe_text(
-                item.get(
-                    "url"
-                )
-            )
-
-            content = safe_text(
-                item.get(
-                    "content"
-                )
-            )
-
-            with st.expander(
-                title
-            ):
-
-                if url:
-                    st.markdown(
-                        url
-                    )
-
-                st.write(
-                    content
-                )
-
-    # ========================================================
-    # CLEAR RESULT
-    # ========================================================
-
-    if st.button(
-        "Clear Command Center Result",
-        key="cc_clear",
+    with st.spinner(
+        "Command Center Step 3/5 — CrewAI agents are communicating..."
     ):
+        result = run_marine_command_center(
+            provider=selected_provider(),
+            topic=topic,
+            engine_model=engine_model,
+            ship=ship,
+            objective=objective,
+            manual_context=manual_context,
+            web_context=web_context,
+            api_key=require_provider_key(selected_provider()),
+        )
 
-        for key in (
-            "command_center_result",
-            "command_center_context",
-            "command_center_sources",
-            "command_center_web",
-            "command_center_case",
-        ):
+    st.session_state.command_center_result = result
+    _render_command_center_result(result)
 
-            st.session_state.pop(
-                key,
-                None,
+
+def _render_command_center_result(
+    result: dict[str, Any],
+) -> None:
+    st.markdown("### CrewAI Collaboration")
+
+    agents = result.get("agent_names", []) or []
+
+    if agents:
+        cols = st.columns(
+            min(len(agents), 5)
+        )
+
+        for index, agent_name in enumerate(agents):
+            cols[index % len(cols)].success(
+                agent_name
             )
 
-        st.rerun()
+    st.markdown("### Final Marine AI Result")
+
+    final_text = safe_text(
+        result.get("final")
+    )
+
+    if final_text:
+        st.markdown(final_text)
+
+    task_outputs = result.get(
+        "task_outputs",
+        [],
+    ) or []
+
+    if task_outputs:
+        with st.expander(
+            "View Agent-to-Agent Communication"
+        ):
+            for item in task_outputs:
+                st.markdown(
+                    f"**{safe_text(item.get('task'))}**"
+                )
+                st.write(
+                    safe_text(item.get("output"))
+                )
+
+    if result.get("used_web_evidence"):
+        st.caption(
+            "This result includes supplementary web evidence requested by the user."
+        )
+    else:
+        st.caption(
+            "This result was generated without supplementary web evidence."
+        )
+
+
 # ============================================================
 # LEARNING PAGE
 # ============================================================
@@ -6118,124 +5432,85 @@ def make_training_pdf(
     content: str,
     sources: list[dict[str, Any]],
     diagram: bytes,
-    web_sources: list[dict[str, Any]] | None = None,
 ) -> bytes:
-    """Create a clean, justified A4 PDF using Times New Roman when available."""
-    from reportlab.lib import colors
-    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import ParagraphStyle
-    from reportlab.lib.units import mm
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import inch
     from reportlab.platypus import (
         Image as RLImage,
-        KeepTogether,
-        PageBreak,
         Paragraph,
         SimpleDocTemplate,
         Spacer,
     )
 
-    font_name = _register_reportlab_fonts()
     output = io.BytesIO()
+
     document = SimpleDocTemplate(
         output,
         pagesize=A4,
-        rightMargin=18 * mm,
-        leftMargin=18 * mm,
-        topMargin=18 * mm,
-        bottomMargin=18 * mm,
-        title=clean_output_text(f"MarineWise AI — {topic}"),
-        author="MarineWise AI",
+        rightMargin=36,
+        leftMargin=36,
+        topMargin=36,
+        bottomMargin=36,
     )
 
-    title_style = ParagraphStyle(
-        "MarineTitle",
-        fontName=font_name,
-        fontSize=22,
-        leading=27,
-        alignment=TA_CENTER,
-        textColor=colors.HexColor("#17324D"),
-        spaceAfter=8,
-    )
-    meta_style = ParagraphStyle(
-        "MarineMeta",
-        fontName=font_name,
-        fontSize=14,
-        leading=20,
-        alignment=TA_CENTER,
-        textColor=colors.HexColor("#344054"),
-        spaceAfter=12,
-    )
-    body_style = ParagraphStyle(
-        "MarineBody",
-        fontName=font_name,
-        fontSize=14,
-        leading=20,
-        alignment=TA_JUSTIFY,
-        textColor=colors.HexColor("#17202A"),
-        spaceAfter=8,
-        allowWidows=0,
-        allowOrphans=0,
-    )
-    heading_style = ParagraphStyle(
-        "MarineHeading",
-        fontName=font_name,
-        fontSize=17,
-        leading=21,
-        alignment=TA_LEFT,
-        textColor=colors.HexColor("#17324D"),
-        spaceBefore=10,
-        spaceAfter=7,
-    )
-    source_style = ParagraphStyle(
-        "MarineSource",
-        fontName=font_name,
-        fontSize=11,
-        leading=16,
-        alignment=TA_LEFT,
-        textColor=colors.HexColor("#475467"),
-        spaceAfter=5,
-    )
+    styles = getSampleStyleSheet()
 
     story = [
-        Paragraph("MarineWise AI — Technical Training", title_style),
+        Paragraph(
+            "MarineWise AI — Technical Training",
+            styles["Title"],
+        ),
         Paragraph(
             safe_paragraph(
-                clean_output_text(
-                    f"Engine: {engine} | Ship: {ship or 'Not specified'} | Topic: {topic}"
-                )
+                f"Engine: {engine} | "
+                f"Ship: {ship or 'Not specified'} | "
+                f"Topic: {topic}"
             ),
-            meta_style,
+            styles["Heading2"],
+        ),
+        Spacer(1, 10),
+        RLImage(
+            io.BytesIO(diagram),
+            width=6.8 * inch,
+            height=3.06 * inch,
         ),
     ]
 
-    if diagram:
-        try:
-            img = RLImage(io.BytesIO(diagram), width=170 * mm, height=74 * mm)
-            story.extend([img, Spacer(1, 8)])
-        except Exception:
-            pass
+    for part in split_text(content):
+        story.extend(
+            [
+                Paragraph(
+                    safe_paragraph(part),
+                    styles["BodyText"],
+                ),
+                Spacer(1, 8),
+            ]
+        )
 
-    for part in split_text(clean_output_text(content), 1500):
-        story.append(Paragraph(safe_paragraph(part), body_style))
-
-    source_lines = _source_lines(sources, web_sources)
-    if source_lines:
-        story.append(PageBreak())
-        story.append(Paragraph("Sources & References", heading_style))
+    if sources:
         story.append(
             Paragraph(
-                safe_paragraph(
-                    "Primary source: supplied manufacturer manuals. "
-                    "Secondary source: reliable technical web research where the manual did not provide the required information."
-                ),
-                body_style,
+                "Manual Sources",
+                styles["Heading2"],
             )
         )
-        for line in source_lines:
-            story.append(Paragraph(safe_paragraph(line), source_style))
 
-    document.build(story)
+        for source in sources:
+            story.append(
+                Paragraph(
+                    safe_paragraph(
+                        f"{source['source']} — "
+                        f"page {source['page']}"
+                    ),
+                    styles["BodyText"],
+                )
+            )
+
+    document.build(
+        story
+    )
+
     return output.getvalue()
 
 
@@ -6245,73 +5520,39 @@ def make_training_docx(
     topic: str,
     content: str,
     diagram: bytes,
-    sources: list[dict[str, Any]] | None = None,
-    web_sources: list[dict[str, Any]] | None = None,
 ) -> bytes:
-    """Create a professional Word document with explicit 14pt Times New Roman body text."""
     from docx import Document
-    from docx.enum.section import WD_SECTION
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.shared import Inches, Pt
+    from docx.shared import Inches
 
     document = Document()
-    section = document.sections[0]
-    section.top_margin = Inches(0.7)
-    section.bottom_margin = Inches(0.7)
-    section.left_margin = Inches(0.8)
-    section.right_margin = Inches(0.8)
 
-    normal = document.styles["Normal"]
-    normal.font.name = "Times New Roman"
-    normal.font.size = Pt(14)
-    try:
-        normal._element.rPr.rFonts.set(normal._element.rPr.rFonts.get_or_add_ascii(), "Times New Roman")
-        normal._element.rPr.rFonts.set(normal._element.rPr.rFonts.get_or_add_hAnsi(), "Times New Roman")
-    except Exception:
-        pass
-
-    title = document.add_paragraph()
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = title.add_run(clean_output_text("MarineWise AI — Technical Training"))
-    _set_docx_run_font(run, "Times New Roman", 20, True)
-
-    _add_docx_paragraph(
-        document,
-        f"Engine: {engine} | Ship: {ship or 'Not specified'} | Topic: {topic}",
-        size=14,
-        bold=False,
-        align=1,
+    document.add_heading(
+        "MarineWise AI — Technical Training",
+        0,
     )
 
-    if diagram:
-        try:
-            p = document.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.add_run().add_picture(io.BytesIO(diagram), width=Inches(6.4))
-        except Exception:
-            pass
+    document.add_paragraph(
+        f"Engine: {engine} | "
+        f"Ship: {ship or 'Not specified'} | "
+        f"Topic: {topic}"
+    )
 
-    for part in split_text(clean_output_text(content), 1500):
-        _add_docx_paragraph(document, part, size=14, bold=False, align=3)
+    document.add_picture(
+        io.BytesIO(diagram),
+        width=Inches(6.5),
+    )
 
-    source_lines = _source_lines(sources, web_sources)
-    if source_lines:
-        document.add_page_break()
-        heading = document.add_paragraph()
-        heading.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        run = heading.add_run("Sources & References")
-        _set_docx_run_font(run, "Times New Roman", 17, True)
-        _add_docx_paragraph(
-            document,
-            "Primary source: supplied manufacturer manuals. Secondary source: reliable technical web research where required.",
-            size=14,
-            align=3,
+    for part in split_text(content):
+        document.add_paragraph(
+            part
         )
-        for line in source_lines:
-            _add_docx_paragraph(document, line, size=12, align=0)
 
     output = io.BytesIO()
-    document.save(output)
+
+    document.save(
+        output
+    )
+
     return output.getvalue()
 
 
@@ -6319,118 +5560,130 @@ def make_quiz_pdf(
     topic: str,
     qtype: str,
     text: str,
-    sources: list[dict[str, Any]] | None = None,
-    web_sources: list[dict[str, Any]] | None = None,
 ) -> bytes:
-    """Create a clean quiz PDF with 14pt justified Times New Roman body text."""
-    from reportlab.lib import colors
-    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import ParagraphStyle
-    from reportlab.lib.units import mm
-    from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import (
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+    )
 
-    font_name = _register_reportlab_fonts()
     output = io.BytesIO()
+
     document = SimpleDocTemplate(
         output,
         pagesize=A4,
-        rightMargin=18 * mm,
-        leftMargin=18 * mm,
-        topMargin=18 * mm,
-        bottomMargin=18 * mm,
-        title=clean_output_text(f"MarineWise AI — {topic} Quiz"),
-        author="MarineWise AI",
+        rightMargin=36,
+        leftMargin=36,
+        topMargin=36,
+        bottomMargin=36,
     )
 
-    title_style = ParagraphStyle(
-        "QuizTitle", fontName=font_name, fontSize=21, leading=26,
-        alignment=TA_CENTER, textColor=colors.HexColor("#17324D"), spaceAfter=8,
-    )
-    meta_style = ParagraphStyle(
-        "QuizMeta", fontName=font_name, fontSize=14, leading=20,
-        alignment=TA_CENTER, textColor=colors.HexColor("#344054"), spaceAfter=12,
-    )
-    body_style = ParagraphStyle(
-        "QuizBody", fontName=font_name, fontSize=14, leading=20,
-        alignment=TA_JUSTIFY, textColor=colors.HexColor("#17202A"), spaceAfter=9,
-    )
-    source_style = ParagraphStyle(
-        "QuizSource", fontName=font_name, fontSize=11, leading=16,
-        alignment=TA_LEFT, textColor=colors.HexColor("#475467"), spaceAfter=5,
-    )
+    styles = getSampleStyleSheet()
 
     story = [
-        Paragraph("MarineWise AI — Technical Assessment / Quiz", title_style),
         Paragraph(
-            safe_paragraph(clean_output_text(f"Topic: {topic} | Type: {qtype}")),
-            meta_style,
+            "MarineWise AI — Technician Quiz",
+            styles["Title"],
         ),
-        Spacer(1, 6),
+        Paragraph(
+            safe_paragraph(
+                f"Topic: {topic} | "
+                f"Type: {qtype}"
+            ),
+            styles["Heading2"],
+        ),
+        Spacer(1, 10),
     ]
 
-    quiz_text_clean = clean_output_text(text)
-    answer_match = re.search(r"(?is)\bANSWER\s+KEY\b", quiz_text_clean)
-    question_text = quiz_text_clean
-    answer_text = ""
-    if answer_match:
-        question_text = quiz_text_clean[:answer_match.start()].strip()
-        answer_text = quiz_text_clean[answer_match.end():].strip()
-
-    # Keep questions separate from the answer key so the printed assessment is
-    # clean and the key never appears halfway through a question block.
-    for part in split_text(question_text, 1200):
-        story.append(Paragraph(safe_paragraph(part), body_style))
-
-    story.append(PageBreak())
-    story.append(Paragraph("Answer Key", title_style))
-    if answer_text:
-        for part in split_text(answer_text, 1200):
-            story.append(Paragraph(safe_paragraph(part), body_style))
-    else:
-        story.append(
-            Paragraph(
-                safe_paragraph("No explicit answer key marker was returned by the quiz generator."),
-                body_style,
-            )
+    for part in split_text(
+        text,
+        1500,
+    ):
+        story.extend(
+            [
+                Paragraph(
+                    safe_paragraph(part),
+                    styles["BodyText"],
+                ),
+                Spacer(1, 8),
+            ]
         )
 
-    source_lines = _source_lines(sources, web_sources)
-    if source_lines:
-        story.append(Spacer(1, 10))
-        story.append(Paragraph("Source Verification", title_style))
-        for line in source_lines:
-            story.append(Paragraph(safe_paragraph(line), source_style))
+    document.build(
+        story
+    )
 
-    document.build(story)
     return output.getvalue()
 
 
 def make_remedial_ppt(
     text: str,
 ) -> bytes:
-    """Legacy remedial PPT helper retained for compatibility, with safe formatting."""
     from pptx import Presentation
     from pptx.dml.color import RGBColor
     from pptx.util import Inches, Pt
 
     prs = Presentation()
+
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
 
-    parts = split_text(clean_output_text(text), 900)
-    for index, part in enumerate(parts[:8], start=1):
-        slide = prs.slides.add_slide(prs.slide_layouts[6])
-        add_slide_background(slide)
-        add_top_bar(slide, f"Remedial Training — Part {index}", "Remedial")
-        _add_ppt_text_box(
-            slide, part, 0.75, 1.35, 11.8, 5.2,
-            font_size=16, color=DARK, align=3
+    parts = split_text(
+        text,
+        950,
+    )
+
+    for index, part in enumerate(
+        parts[:8],
+        start=1,
+    ):
+        slide = prs.slides.add_slide(
+            prs.slide_layouts[6]
         )
-        add_footer(slide, index, "MarineWise AI — Remedial Training")
+
+        add_slide_background(
+            slide
+        )
+
+        add_top_bar(
+            slide,
+            f"Remedial Training — Part {index}",
+            "Remedial",
+        )
+
+        box = slide.shapes.add_textbox(
+            Inches(0.75),
+            Inches(1.4),
+            Inches(11.8),
+            Inches(5.2),
+        )
+
+        tf = box.text_frame
+
+        tf.text = part
+
+        for paragraph in tf.paragraphs:
+            paragraph.font.size = Pt(18)
+            paragraph.font.color.rgb = (
+                RGBColor.from_string(
+                    DARK
+                )
+            )
+
+        add_footer(
+            slide,
+            index,
+            "MarineWise AI — Remedial Training",
+        )
 
     output = io.BytesIO()
-    prs.save(output)
+
+    prs.save(
+        output
+    )
+
     return output.getvalue()
 
 
@@ -6439,12 +5692,7 @@ def make_remedial_ppt(
 # ============================================================
 
 
-# ============================================================
-# MAIN APPLICATION
-# ============================================================
-
 def main() -> None:
-
     sidebar_manuals()
 
     page = st.sidebar.radio(
@@ -6458,21 +5706,10 @@ def main() -> None:
     )
 
     try:
-
-        # ----------------------------------------------------
-        # PAGE 1 — TROUBLESHOOTING AGENT
-        # ----------------------------------------------------
-
         if page == "Troubleshooting Agent":
-
             troubleshooting_page()
 
-        # ----------------------------------------------------
-        # PAGE 2 — TRAINING AGENT
-        # ----------------------------------------------------
-
         elif page == "Training Agent":
-
             st.markdown(
                 '<div class="main-title">'
                 "Technical Training Agent"
@@ -6514,24 +5751,13 @@ def main() -> None:
             with tabs[2]:
                 assessment_page()
 
-        # ----------------------------------------------------
-        # PAGE 3 — MARINE AI COMMAND CENTER
-        # ----------------------------------------------------
-
         elif page == "Marine AI Command Center":
-
             marine_ai_command_center_page()
 
-        # ----------------------------------------------------
-        # PAGE 4 — LEARNING
-        # ----------------------------------------------------
-
         elif page == "Learning":
-
             learning_page()
 
     except Exception as exc:
-
         import traceback
 
         message = str(exc)
@@ -6540,10 +5766,7 @@ def main() -> None:
             f"MarineWise AI encountered an error: {exc}"
         )
 
-        with st.expander(
-            "Show technical error details"
-        ):
-
+        with st.expander("Show technical error details"):
             st.code(
                 traceback.format_exc(),
                 language="text",
@@ -6553,7 +5776,6 @@ def main() -> None:
             "context_length_exceeded" in message
             or "reduce the length" in message.lower()
         ):
-
             st.error(
                 f"The request was too large for the "
                 f"current {selected_provider()} request limits."
@@ -6564,9 +5786,7 @@ def main() -> None:
                 "small context budget. Training uses a "
                 "separate larger context budget."
             )
-
         else:
-
             st.caption(
                 "Also check that the selected provider API key, "
                 "TAVILY_API_KEY, and uploaded manual are configured "
