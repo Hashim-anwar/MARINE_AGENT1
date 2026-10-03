@@ -271,6 +271,177 @@ def safe_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def clean_output_text(value: Any) -> str:
+    """Normalize AI text before placing it in professional documents."""
+    import unicodedata
+
+    text = safe_text(value)
+    replacements = {
+        "\u00a0": " ", "\u200b": "", "\u200c": "", "\u200d": "", "\ufeff": "",
+        "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+        "\u2013": "-", "\u2014": "-", "\u2212": "-", "\u2022": "-",
+        "\u2192": "->", "\u2190": "<-", "\u2713": "[OK]", "\u2714": "[OK]",
+        "\u2717": "[X]", "\u2718": "[X]", "\u00d7": "x",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    cleaned=[]
+    for char in text:
+        category=unicodedata.category(char)
+        if category == "Cf":
+            continue
+        if category == "Cc" and char not in {"\n", "\t", "\r"}:
+            continue
+        cleaned.append(char)
+    text="".join(cleaned)
+    text=re.sub(r"[ \t]+", " ", text)
+    text=re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _find_document_font() -> tuple[str, str | None, str | None, str | None]:
+    """Prefer Times New Roman; use a serif fallback only if unavailable."""
+    candidates=[
+        ("Times New Roman", r"C:\\Windows\\Fonts\\times.ttf", r"C:\\Windows\\Fonts\\timesbd.ttf", r"C:\\Windows\\Fonts\\timesi.ttf"),
+        ("Times New Roman", "/Library/Fonts/Times New Roman.ttf", "/Library/Fonts/Times New Roman Bold.ttf", "/Library/Fonts/Times New Roman Italic.ttf"),
+        ("Times New Roman", "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman.ttf", "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman_Bold.ttf", "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman_Italic.ttf"),
+    ]
+    for name, regular, bold, italic in candidates:
+        if os.path.exists(regular):
+            return name, regular, bold if os.path.exists(bold) else None, italic if os.path.exists(italic) else None
+    try:
+        from matplotlib import font_manager
+        regular=font_manager.findfont(font_manager.FontProperties(family="DejaVu Serif"))
+        bold=font_manager.findfont(font_manager.FontProperties(family="DejaVu Serif", weight="bold"))
+        italic=font_manager.findfont(font_manager.FontProperties(family="DejaVu Serif", style="italic"))
+        return "DejaVu Serif", regular, bold, italic
+    except Exception:
+        return "Times-Roman", None, None, None
+
+
+def _register_reportlab_fonts() -> str:
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    _family, regular, bold, italic = _find_document_font()
+    if regular:
+        family="MarineWiseSerif"
+        try:
+            if family not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(TTFont(family, regular))
+                if bold:
+                    pdfmetrics.registerFont(TTFont(f"{family}-Bold", bold))
+                if italic:
+                    pdfmetrics.registerFont(TTFont(f"{family}-Italic", italic))
+            return family
+        except Exception:
+            pass
+    return "Times-Roman"
+
+
+def _source_lines(sources: list[dict[str, Any]] | None = None, web_sources: list[dict[str, Any]] | None = None) -> list[str]:
+    lines=[]; seen=set()
+    for source in sources or []:
+        name=clean_output_text(source.get("source")); page=source.get("page", "")
+        if name:
+            line=f"Manual: {name} - page {page}"
+            if line not in seen: seen.add(line); lines.append(line)
+    for source in web_sources or []:
+        title=clean_output_text(source.get("title")) or "Technical web source"
+        url=clean_output_text(source.get("url"))
+        if url:
+            line=f"Web: {title} - {url}"
+            if line not in seen: seen.add(line); lines.append(line)
+    return lines
+
+
+def make_troubleshooting_pdf(case: dict[str, Any], manual_answer: str | None, sources: list[dict[str, Any]] | None = None, web_answer: str | None = None, web_sources: list[dict[str, Any]] | None = None) -> bytes:
+    """Create a clean A4 troubleshooting PDF using 14pt justified serif body text."""
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+
+    font=_register_reportlab_fonts()
+    out=io.BytesIO()
+    doc=SimpleDocTemplate(out, pagesize=A4, rightMargin=18*mm, leftMargin=18*mm, topMargin=18*mm, bottomMargin=18*mm, title="MarineWise AI Troubleshooting", author="MarineWise AI")
+    title=ParagraphStyle("t_title",fontName=font,fontSize=20,leading=24,alignment=TA_CENTER,textColor=colors.HexColor("#17324D"),spaceAfter=8)
+    meta=ParagraphStyle("t_meta",fontName=font,fontSize=14,leading=20,alignment=TA_CENTER,textColor=colors.HexColor("#344054"),spaceAfter=12)
+    body=ParagraphStyle("t_body",fontName=font,fontSize=14,leading=20,alignment=TA_JUSTIFY,textColor=colors.HexColor("#17202A"),spaceAfter=8,allowWidows=0,allowOrphans=0)
+    step=ParagraphStyle("t_step",fontName=font,fontSize=14,leading=20,alignment=TA_JUSTIFY,textColor=colors.HexColor("#17202A"),leftIndent=7*mm,firstLineIndent=-7*mm,spaceAfter=10,allowWidows=0,allowOrphans=0)
+    head=ParagraphStyle("t_head",fontName=font,fontSize=17,leading=21,alignment=TA_LEFT,textColor=colors.HexColor("#17324D"),spaceBefore=10,spaceAfter=7)
+    small=ParagraphStyle("t_small",fontName=font,fontSize=11,leading=16,alignment=TA_LEFT,textColor=colors.HexColor("#475467"),spaceAfter=5)
+    esc=lambda x: safe_paragraph(clean_output_text(x))
+    c=case
+    story=[Paragraph("MarineWise AI - Step-by-Step Troubleshooting",title), Paragraph(esc(f"Manufacturer: {c.get('manufacturer','Not specified')} | Engine Model: {c.get('engine_model','Not specified')} | Serial: {c.get('serial') or 'Not provided'}"),meta), Paragraph("Reported Defect / Alarm",head), Paragraph(esc(c.get("defect")),body)]
+
+    def append_answer(label, text):
+        if not text or not clean_output_text(text): return
+        story.append(Paragraph(label,head))
+        for raw in clean_output_text(text).splitlines():
+            line=raw.strip()
+            if not line: continue
+            line=re.sub(r"^#{1,6}\s*", "", line)
+            line=re.sub(r"^[-*•]+\s*", "", line)
+            m=re.match(r"^(\d+)[.)]\s+(.*)$", line)
+            if m: story.append(Paragraph(esc(f"{m.group(1)}. {m.group(2)}"),step))
+            elif len(line)<=90 and line.endswith(":"): story.append(Paragraph(esc(line[:-1]),head))
+            else: story.append(Paragraph(esc(line),body))
+
+    if manual_answer:
+        append_answer("OEM / Manual-Grounded Troubleshooting", manual_answer)
+    if web_answer:
+        story.append(PageBreak())
+        append_answer("Approved Online Supplementary Troubleshooting", web_answer)
+    refs=_source_lines(sources, web_sources)
+    if refs:
+        story.append(PageBreak()); story.append(Paragraph("Sources & References",head))
+        for ref in refs: story.append(Paragraph(esc(ref),small))
+    doc.build(story)
+    return out.getvalue()
+
+
+def make_command_center_pdf(result: dict[str, Any]) -> bytes:
+    """Create a downloadable Command Center final-response PDF."""
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, PageBreak
+
+    font=_register_reportlab_fonts(); out=io.BytesIO()
+    doc=SimpleDocTemplate(out,pagesize=A4,rightMargin=18*mm,leftMargin=18*mm,topMargin=18*mm,bottomMargin=18*mm,title="MarineWise AI Command Center Result",author="MarineWise AI")
+    title=ParagraphStyle("cc_title",fontName=font,fontSize=20,leading=24,alignment=TA_CENTER,textColor=colors.HexColor("#17324D"),spaceAfter=10)
+    head=ParagraphStyle("cc_head",fontName=font,fontSize=17,leading=21,alignment=TA_LEFT,textColor=colors.HexColor("#17324D"),spaceBefore=10,spaceAfter=7)
+    body=ParagraphStyle("cc_body",fontName=font,fontSize=14,leading=20,alignment=TA_JUSTIFY,textColor=colors.HexColor("#17202A"),spaceAfter=8)
+    small=ParagraphStyle("cc_small",fontName=font,fontSize=11,leading=16,alignment=TA_LEFT,textColor=colors.HexColor("#475467"),spaceAfter=5)
+    esc=lambda x:safe_paragraph(clean_output_text(x))
+    topic=clean_output_text(result.get("topic")) or "Marine Technical Case"
+    story=[Paragraph("MarineWise AI - Command Center Final Report",title),Paragraph(esc(f"Topic: {topic}"),body)]
+    for label,key in [("Equipment / Engine Model","engine_model"),("Ship","ship"),("Technical Objective","objective")]:
+        value=clean_output_text(result.get(key))
+        if value: story += [Paragraph(label,head),Paragraph(esc(value),body)]
+    story += [Paragraph("Final Marine AI Response",head)]
+    final=clean_output_text(result.get("final"))
+    for raw in final.splitlines():
+        line=raw.strip()
+        if not line: continue
+        line=re.sub(r"^#{1,6}\s*", "", line); line=re.sub(r"^[-*•]+\s*", "", line)
+        m=re.match(r"^(\d+)[.)]\s+(.*)$",line)
+        story.append(Paragraph(esc(f"{m.group(1)}. {m.group(2)}") if m else esc(line),body))
+    agents=result.get("agent_names",[]) or []
+    if agents:
+        story += [PageBreak(),Paragraph("CrewAI Agents Involved",head)]
+        for a in agents: story.append(Paragraph(esc(a),body))
+    if result.get("used_web_evidence"):
+        story += [Paragraph("Evidence Note",head),Paragraph(esc("This final response includes supplementary online evidence that was explicitly requested by the user."),body)]
+    else:
+        story += [Paragraph("Evidence Note",head),Paragraph(esc("This final response was generated without supplementary online evidence."),body)]
+    doc.build(story); return out.getvalue()
+
+
 def split_text(
     text: str,
     max_chars: int = 1100,
@@ -706,301 +877,121 @@ def make_context_query(
 
 
 def troubleshooting_page() -> None:
-    st.markdown(
-        '<div class="main-title">Troubleshooting Agent</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        '<div class="main-subtitle">'
-        "Manual-grounded marine engine troubleshooting"
-        "</div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="main-title">Troubleshooting Agent</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-subtitle">Manual-first, human-in-the-loop marine engine troubleshooting</div>', unsafe_allow_html=True)
 
     with st.form("troubleshoot_form"):
-        manufacturer = st.selectbox(
-            "Manufacturer",
-            [
-                "CAT",
-                "MTU",
-                "YANMAR",
-                "YAMAHA",
-                "HONDA",
-                "MAN",
-                "OTHER",
-            ],
-        )
-
-        engine_model = st.text_input(
-            "Engine Model",
-            placeholder="e.g. MTU 16V 4000 M90",
-        )
-
-        serial = st.text_input(
-            "Serial Number (optional)"
-        )
-
-        defect = st.text_area(
-            "Defect or Alarm",
-            placeholder=(
-                "Describe the symptom, alarm code, "
-                "and what happened."
-            ),
-        )
-
-        submitted = st.form_submit_button(
-            "Troubleshoot",
-            type="primary",
-        )
+        manufacturer=st.selectbox("Manufacturer",["CAT","MTU","YANMAR","YAMAHA","HONDA","MAN","OTHER"])
+        engine_model=st.text_input("Engine Model",placeholder="e.g. MTU 16V 4000 M90")
+        serial=st.text_input("Serial Number (optional)")
+        defect=st.text_area("Defect or Alarm",placeholder="Describe the symptom, alarm code, and what happened.")
+        submitted=st.form_submit_button("Troubleshoot",type="primary")
 
     if submitted:
-        if (
-            not engine_model.strip()
-            or not defect.strip()
-        ):
-            st.warning(
-                "Please enter the engine model "
-                "and defect/alarm."
-            )
-            return
-
-        rag = st.session_state.get("rag")
-
+        if not engine_model.strip() or not defect.strip():
+            st.warning("Please enter the engine model and defect/alarm."); return
+        rag=st.session_state.get("rag")
         if not rag:
-            st.warning(
-                "No manuals are indexed. "
-                "Build the FAISS index first."
-            )
-            return
-
-        st.session_state.troubleshooting_case = {
-            "manufacturer": manufacturer,
-            "engine_model": engine_model.strip(),
-            "serial": serial.strip(),
-            "defect": defect.strip(),
-        }
-
-        st.session_state.troubleshooting_answer = None
-        st.session_state.troubleshooting_web_answer = None
-        st.session_state.troubleshooting_web_choice = None
-
-        query = make_context_query(
-            manufacturer,
-            engine_model,
-            defect,
-        )
-
-        with st.spinner(
-            "Searching the supplied manuals..."
-        ):
-            results = search_index(
-                rag,
-                query,
-                get_embedder(),
-                k=6,
-            )
-
-            context, relevant = retrieve_context(
-                results,
-                min_score=0.32,
-                max_chunks=2,
-                max_chars=3000,
-            )
-
-            st.session_state.troubleshooting_context = context
-            st.session_state.troubleshooting_sources = relevant
-            st.session_state.last_retrieved = relevant
-
+            st.warning("No manuals are indexed. Build the FAISS index first."); return
+        st.session_state.troubleshooting_case={"manufacturer":manufacturer,"engine_model":engine_model.strip(),"serial":serial.strip(),"defect":defect.strip()}
+        st.session_state.troubleshooting_answer=None
+        st.session_state.troubleshooting_web_answer=None
+        st.session_state.troubleshooting_web_choice=None
+        st.session_state.troubleshooting_web_error=None
+        st.session_state.troubleshooting_combined_answer=None
+        query=make_context_query(manufacturer,engine_model,defect)
+        with st.spinner("Searching the supplied OEM/manual documents..."):
+            results=search_index(rag,query,get_embedder(),k=8)
+            context,relevant=retrieve_context(results,min_score=0.30,max_chunks=4,max_chars=5000)
+            st.session_state.troubleshooting_context=context
+            st.session_state.troubleshooting_sources=relevant
+            st.session_state.last_retrieved=relevant
         if context:
-            with st.spinner(
-                "Preparing a manual-grounded answer..."
-            ):
-                answer = run_agent(
-                    """
-You are a marine engine troubleshooting specialist.
-
-Use ONLY the supplied manual excerpts.
-
-Do not invent:
-- specifications
-- causes
-- alarm limits
-- procedures
-- component locations
-- maintenance intervals
-
-If the excerpts do not actually answer the question, return exactly:
-
-Not found in manuals. Do you want me to search online?
-
-Cite the source file and exact page number
-for claims that are supported by the excerpts.
-""",
-                    (
-                        f"Manufacturer: {manufacturer}\n"
-                        f"Engine model: {engine_model}\n"
-                        f"Serial: {serial or 'not provided'}\n"
-                        f"Defect/alarm: {defect}\n\n"
-                        f"MANUAL EXCERPTS:\n{context}"
-                    ),
+            with st.spinner("Preparing a manual-grounded troubleshooting procedure..."):
+                answer=run_agent(
+                    """You are a marine engine troubleshooting specialist. Use ONLY the supplied OEM/manual excerpts as evidence. Produce a technician-ready step-by-step troubleshooting procedure. Organize it as: 1. symptom interpretation, 2. safety/isolation, 3. diagnostic checks in sequence, 4. expected result for each check, 5. decision point if abnormal, 6. corrective action when supported, 7. final verification. Do not invent specifications, alarm limits, component locations, measurements, or procedures. If the excerpts contain only partial information, provide only the supported steps and clearly identify the missing information. Cite manual file/page for supported claims.""",
+                    f"Manufacturer: {manufacturer}\nEngine model: {engine_model}\nSerial: {serial or 'not provided'}\nDefect/alarm: {defect}\n\nOEM/MANUAL EXCERPTS:\n{context}",
                     "troubleshooting",
                 )
-
-            st.session_state.troubleshooting_answer = answer
-
+            st.session_state.troubleshooting_answer=answer
         else:
-            st.session_state.troubleshooting_answer = (
-                "Not found in manuals. "
-                "Do you want me to search online?"
-            )
+            st.session_state.troubleshooting_answer=None
 
-    case = st.session_state.get(
-        "troubleshooting_case"
-    )
-
-    if not case:
-        return
-
-    relevant = st.session_state.get(
-        "troubleshooting_sources",
-        [],
-    )
-
-    context = st.session_state.get(
-        "troubleshooting_context",
-        "",
-    )
-
-    answer = st.session_state.get(
-        "troubleshooting_answer"
-    )
+    case=st.session_state.get("troubleshooting_case")
+    if not case: return
+    relevant=st.session_state.get("troubleshooting_sources",[])
+    context=st.session_state.get("troubleshooting_context","")
+    answer=st.session_state.get("troubleshooting_answer")
+    web_answer=st.session_state.get("troubleshooting_web_answer")
+    choice=st.session_state.get("troubleshooting_web_choice")
 
     if context or relevant:
-        rag = st.session_state.get("rag")
-
-        if rag:
-            st.caption(
-                f"Chunk size: {rag['chunk_size']} characters • "
-                f"Retrieved pages: "
-                f"{len({r['page'] for r in relevant})}"
-            )
-
+        rag=st.session_state.get("rag")
+        if rag: st.caption(f"Chunk size: {rag['chunk_size']} characters • Retrieved pages: {len({r['page'] for r in relevant})}")
         render_sources(relevant)
-
     if answer:
-        st.markdown("### Troubleshooting answer")
+        st.markdown("### OEM / Manual Troubleshooting")
         st.write(answer)
 
-    not_found_phrase = (
-        "Not found in manuals. "
-        "Do you want me to search online?"
-    )
-
-    manual_not_found = (
-        not context
-        or not answer
-        or not_found_phrase.lower()
-        in answer.lower()
-    )
-
-    if (
-        manual_not_found
-        and st.session_state.get(
-            "troubleshooting_web_answer"
-        )
-        is None
-    ):
-        st.warning(not_found_phrase)
-
-        choice = st.session_state.get(
-            "troubleshooting_web_choice"
-        )
-
+    # Human-in-the-loop: online research is offered whenever the manual did not
+    # provide enough information for a reliable answer.
+    manual_has_useful_answer=bool(context and answer and "not found in manuals" not in answer.lower())
+    if not manual_has_useful_answer and web_answer is None:
+        st.warning("The supplied OEM/manual evidence does not provide enough information for a complete troubleshooting procedure.")
+        st.write("Would you like MarineWise AI to search reliable online technical sources?")
         if choice is None:
-            st.write(
-                "Would you like MarineWise AI to search "
-                "reliable online technical sources?"
-            )
-
-            yes_col, no_col = st.columns(2)
-
-            if yes_col.button(
-                "Yes — Search Online",
-                key="web_troubleshoot_yes",
-                type="primary",
-            ):
-                st.session_state.troubleshooting_web_choice = (
-                    "yes"
-                )
-                st.rerun()
-
-            if no_col.button(
-                "No — Stay Manual-Only",
-                key="web_troubleshoot_no",
-            ):
-                st.session_state.troubleshooting_web_choice = (
-                    "no"
-                )
-                st.rerun()
-
+            yes_col,no_col=st.columns(2)
+            if yes_col.button("Yes — Search Online",key="web_troubleshoot_yes",type="primary"):
+                st.session_state.troubleshooting_web_choice="yes"; st.rerun()
+            if no_col.button("No — Stay Manual-Only",key="web_troubleshoot_no"):
+                st.session_state.troubleshooting_web_choice="no"; st.rerun()
             return
+        if choice=="no":
+            st.info("Online search was not requested. The troubleshooting result remains manual-only.")
+        elif choice=="yes":
+            try:
+                with st.spinner("Searching approved online technical sources..."):
+                    web_answer=ask_web(
+                        """You are a marine engine troubleshooting research specialist. Search reliable OEM/manufacturer, classification, regulatory and reputable technical sources. Produce technician-ready step-by-step troubleshooting guidance: symptom interpretation, safety/isolation, diagnostic checks, expected results, abnormal-result decisions, corrective action only when supported, and final verification. Do not invent specifications, alarm limits, component locations or procedures. Clearly identify web-derived information and tell the technician to verify it against the current OEM manual.""",
+                        f"Manufacturer: {case['manufacturer']}\nEngine model: {case['engine_model']}\nSerial: {case['serial'] or 'not provided'}\nSymptom/alarm: {case['defect']}\n\nManual evidence already reviewed:\n{context or '[No sufficiently relevant manual evidence]'}",
+                    )
+                st.session_state.troubleshooting_web_answer=web_answer
+                st.session_state.troubleshooting_web_error=None
+            except Exception as exc:
+                st.session_state.troubleshooting_web_answer=None
+                st.session_state.troubleshooting_web_error=safe_text(exc)
+                st.error("Online technical research could not be completed. You can retry the online search.")
 
-        if choice == "no":
-            st.info(
-                "Online search was not requested. "
-                "No web information was used."
-            )
-            return
-
-        if choice == "yes":
-            with st.spinner(
-                "Searching online technical sources..."
-            ):
-                web_answer = ask_web(
-                    """
-You are a marine engine troubleshooting assistant.
-
-This answer is FROM THE WEB, not from the supplied manuals.
-
-Search reliable manufacturer documentation and reputable
-technical sources.
-
-Do not invent specifications.
-
-Clearly say that the answer is from the web and instruct
-the technician to verify it against the current engine manual.
-""",
-                    (
-                        f"Find reliable information for "
-                        f"{case['manufacturer']} "
-                        f"{case['engine_model']}, "
-                        f"serial "
-                        f"{case['serial'] or 'not provided'}, "
-                        f"symptom/alarm: "
-                        f"{case['defect']}.\n\n"
-                        "Explain likely checks and safe next steps."
-                    ),
-                )
-
-            st.session_state.troubleshooting_web_answer = (
-                web_answer
-            )
-
-    web_answer = st.session_state.get(
-        "troubleshooting_web_answer"
-    )
-
+    web_answer=st.session_state.get("troubleshooting_web_answer")
     if web_answer:
-        st.markdown("### Web-sourced answer")
-
-        st.info(
-            "This answer was obtained from online sources "
-            "after you selected **Yes — Search Online**. "
-            "Verify it against the current engine manual."
-        )
-
+        st.markdown("### Approved Online Supplement")
+        st.info("Online research was performed only after your approval. Verify web-derived information against the current OEM manual.")
         st.write(web_answer)
+
+    # When both evidence streams exist, synthesize them into ONE final procedure.
+    combined=st.session_state.get("troubleshooting_combined_answer")
+    if web_answer and not combined:
+        with st.spinner("Combining OEM/manual evidence with the approved online research..."):
+            combined=run_agent(
+                """You are the final MarineWise troubleshooting editor. Combine the supplied OEM/manual evidence and approved online evidence into ONE technician-ready step-by-step troubleshooting procedure. The OEM/manual evidence has priority. Use web evidence only to supplement gaps. Do not invent facts, specifications, alarm limits, measurements, component locations or procedures. Clearly mark any web-derived step. If sources conflict, do not silently choose; state the conflict and instruct verification against the current OEM manual. Structure: 1. Problem/symptom interpretation, 2. Safety/isolation, 3. Diagnostic checks in sequence, 4. Expected result, 5. Action if abnormal, 6. Root cause only when supported, 7. Corrective action only when supported, 8. Final verification/return to service. Include source file/page or web source attribution where available.""",
+                f"CASE:\nManufacturer: {case['manufacturer']}\nEngine model: {case['engine_model']}\nSerial: {case['serial'] or 'not provided'}\nDefect/alarm: {case['defect']}\n\nOEM/MANUAL EVIDENCE:\n{context or '[None]'}\n\nOEM/MANUAL ANSWER:\n{answer or '[None]'}\n\nAPPROVED ONLINE EVIDENCE:\n{web_answer}",
+                "troubleshooting",
+            )
+            st.session_state.troubleshooting_combined_answer=combined
+            st.session_state.troubleshooting_answer=combined
+
+    combined=st.session_state.get("troubleshooting_combined_answer")
+    if combined:
+        st.markdown("### Final Combined Troubleshooting Procedure")
+        st.write(combined)
+
+    final_answer=combined or answer
+    if final_answer:
+        try:
+            pdf=make_troubleshooting_pdf(case, final_answer, relevant, None, [])
+            st.download_button("Download Troubleshooting PDF",data=pdf,file_name="MarineWise_Troubleshooting.pdf",mime="application/pdf",type="primary",key="download_troubleshooting_pdf")
+        except Exception as exc:
+            st.error(f"Could not create the troubleshooting PDF: {exc}")
 
 
 # ============================================================
@@ -5248,6 +5239,19 @@ def _render_command_center_result(
 
     if final_text:
         st.markdown(final_text)
+
+        try:
+            command_center_pdf = make_command_center_pdf(result)
+            st.download_button(
+                "Download Final AI Response as PDF",
+                data=command_center_pdf,
+                file_name="MarineWise_Command_Center_Final_Report.pdf",
+                mime="application/pdf",
+                type="primary",
+                key="download_command_center_pdf",
+            )
+        except Exception as exc:
+            st.error(f"Could not create the Command Center PDF: {exc}")
 
     task_outputs = result.get(
         "task_outputs",
