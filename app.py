@@ -25,6 +25,13 @@ import re
 import textwrap
 from typing import Any
 
+# ReportLab Paragraph is used by the troubleshooting PDF generator.
+# Import it at module level so the PDF function cannot fail with NameError.
+try:
+    from reportlab.platypus import Paragraph
+except ImportError:
+    Paragraph = None
+
 import numpy as np
 
 import requests
@@ -1188,6 +1195,7 @@ def troubleshooting_page() -> None:
 
         st.session_state.troubleshooting_answer = None
         st.session_state.troubleshooting_web_answer = None
+        st.session_state.troubleshooting_web_error = None
         st.session_state.troubleshooting_web_choice = None
 
         query = make_context_query(
@@ -1267,13 +1275,23 @@ Cite the source file and exact page number for claims that are supported by the 
                     "troubleshooting",
                 )
 
-            st.session_state.troubleshooting_answer = answer
+            # The model may repeat the human-in-loop question even though the UI
+            # already renders that question. Store it as a clean not-found state
+            # so the message is shown only once.
+            manual_not_found_markers = (
+                "Not found in manuals. Do you want me to search online?",
+                "Not found in manuals",
+            )
+            if any(
+                marker.lower() in safe_text(answer).lower()
+                for marker in manual_not_found_markers
+            ):
+                st.session_state.troubleshooting_answer = ""
+            else:
+                st.session_state.troubleshooting_answer = answer
 
         else:
-            st.session_state.troubleshooting_answer = (
-                "Not found in manuals. "
-                "Do you want me to search online?"
-            )
+            st.session_state.troubleshooting_answer = ""
 
     case = st.session_state.get(
         "troubleshooting_case"
@@ -1312,17 +1330,9 @@ Cite the source file and exact page number for claims that are supported by the 
         st.markdown("### Troubleshooting answer")
         st.write(answer)
 
-    not_found_phrase = (
-        "Not found in manuals. "
-        "Do you want me to search online?"
-    )
-
-    manual_not_found = (
-        not context
-        or not answer
-        or not_found_phrase.lower()
-        in answer.lower()
-    )
+    # Human-in-the-loop gate: show this prompt exactly once. The answer itself
+    # is kept free of the UI question so it is not duplicated.
+    manual_not_found = not context or not answer
 
     if (
         manual_not_found
@@ -1331,7 +1341,10 @@ Cite the source file and exact page number for claims that are supported by the 
         )
         is None
     ):
-        st.warning(not_found_phrase)
+        st.warning(
+            "Not found in the supplied manuals. "
+            "Would you like MarineWise AI to search reliable online technical sources?"
+        )
 
         choice = st.session_state.get(
             "troubleshooting_web_choice"
@@ -1374,11 +1387,14 @@ Cite the source file and exact page number for claims that are supported by the 
             return
 
         if choice == "yes":
-            with st.spinner(
-                "Searching online technical sources..."
-            ):
-                web_answer = ask_web(
-                    """
+            # Keep the existing human-in-the-loop architecture, but do not let a
+            # temporary provider outage crash the entire Streamlit page.
+            try:
+                with st.spinner(
+                    "Searching online technical sources..."
+                ):
+                    web_answer = ask_web(
+                        """
 You are a marine engine troubleshooting assistant.
 
 This answer is FROM THE WEB, not from the supplied manuals.
@@ -1395,21 +1411,58 @@ Return a properly refined, technician-ready STEP-BY-STEP troubleshooting procedu
 
 Do not invent specifications, alarm limits, procedures, component locations, measurements, or maintenance intervals. Clearly identify information that is web-derived and instruct the technician to verify it against the current engine manual.
 """,
-                    (
-                        f"Find reliable information for "
-                        f"{case['manufacturer']} "
-                        f"{case['engine_model']}, "
-                        f"serial "
-                        f"{case['serial'] or 'not provided'}, "
-                        f"symptom/alarm: "
-                        f"{case['defect']}.\n\n"
-                        "Explain likely checks and safe next steps."
-                    ),
+                        (
+                            f"Find reliable information for "
+                            f"{case['manufacturer']} "
+                            f"{case['engine_model']}, "
+                            f"serial "
+                            f"{case['serial'] or 'not provided'}, "
+                            f"symptom/alarm: "
+                            f"{case['defect']}.\n\n"
+                            "Explain likely checks and safe next steps."
+                        ),
+                    )
+
+                st.session_state.troubleshooting_web_answer = web_answer
+                st.session_state.troubleshooting_web_error = None
+
+            except Exception as exc:
+                error_text = safe_text(exc)
+                is_temporary_provider_error = (
+                    "503" in error_text
+                    or "UNAVAILABLE" in error_text.upper()
+                    or "high demand" in error_text.lower()
+                    or "temporarily unavailable" in error_text.lower()
                 )
 
-            st.session_state.troubleshooting_web_answer = (
-                web_answer
-            )
+                st.session_state.troubleshooting_web_answer = None
+                if is_temporary_provider_error:
+                    st.session_state.troubleshooting_web_error = (
+                        "The online technical-search service is temporarily unavailable "
+                        "(provider returned HTTP 503). Your manual-only troubleshooting "
+                        "workflow is still available. Please try the online search again shortly."
+                    )
+                else:
+                    st.session_state.troubleshooting_web_error = (
+                        "The online technical search could not be completed. "
+                        "Please verify the selected provider API key and TAVILY_API_KEY, "
+                        "then try again."
+                    )
+
+    web_error = st.session_state.get(
+        "troubleshooting_web_error"
+    )
+
+    if web_error:
+        st.warning(web_error)
+        if st.session_state.get("troubleshooting_web_choice") == "yes":
+            if st.button(
+                "Retry Online Search",
+                key="retry_web_troubleshoot",
+            ):
+                st.session_state.troubleshooting_web_answer = None
+                st.session_state.troubleshooting_web_error = None
+                st.rerun()
 
     web_answer = st.session_state.get(
         "troubleshooting_web_answer"
