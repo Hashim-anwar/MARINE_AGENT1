@@ -1353,23 +1353,25 @@ def _crewai_llm(provider: str, api_key: str):
     # This keeps the selected provider explicit; it does NOT silently switch
     # Gemini to Groq or vice versa.
     if provider_clean == "groq":
-        model = f"groq/{GROQ_MODEL}"
-    elif provider_clean == "gemini":
-        model = f"gemini/{GEMINI_MODEL}"
-    else:
-        raise ValueError(f"Unsupported CrewAI provider: {provider_clean}")
-
-    if provider_clean == "groq":
+        # IMPORTANT: Do not use ``groq/...`` here.  In a CrewAI
+        # installation without LiteLLM, Groq is accessed through
+        # CrewAI's native OpenAI-compatible provider.  Groq exposes an
+        # OpenAI-compatible API endpoint, so the existing Groq API key
+        # remains the credential and no OpenAI key is required.
         return LLM(
-            model=model,
+            model=GROQ_MODEL,
             api_key=key,
             base_url="https://api.groq.com/openai/v1",
         )
 
-    return LLM(
-        model=model,
-        api_key=key,
-    )
+    if provider_clean == "gemini":
+        # Gemini uses CrewAI's native Google/Gemini provider.
+        return LLM(
+            model=f"gemini/{GEMINI_MODEL}",
+            api_key=key,
+        )
+
+    raise ValueError(f"Unsupported CrewAI provider: {provider_clean}")
 
 
 def _crew_output_text(value: Any) -> str:
