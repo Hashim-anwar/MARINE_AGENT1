@@ -3256,18 +3256,17 @@ def quiz_page() -> None:
     )
 
     st.caption(
-        "Generate technically relevant marine technician questions "
-        "using manual RAG + online technical research."
+        "Generate technician questions and an answer key."
     )
 
     with st.form("quiz_form"):
         topic = st.text_input(
-            "Quiz Topic",
+            "Topic",
             placeholder="Fuel Injection System",
         )
 
         qtype = st.selectbox(
-            "Question Type",
+            "Type",
             [
                 "MCQ",
                 "Short Question",
@@ -3276,7 +3275,7 @@ def quiz_page() -> None:
         )
 
         count = st.number_input(
-            "Number of Questions",
+            "Number of questions",
             min_value=1,
             max_value=30,
             value=10,
@@ -3284,19 +3283,15 @@ def quiz_page() -> None:
         )
 
         submitted = st.form_submit_button(
-            "Generate Technical Quiz",
+            "Generate Quiz",
             type="primary",
         )
 
     if not submitted:
         return
 
-    topic = topic.strip()
-
-    if not topic:
-        st.warning(
-            "Enter a specific technical topic."
-        )
+    if not topic.strip():
+        st.warning("Enter a topic.")
         return
 
     rag = st.session_state.get(
@@ -3306,486 +3301,166 @@ def quiz_page() -> None:
     context = ""
     relevant: list[dict[str, Any]] = []
 
-    # --------------------------------------------------------
-    # STEP 1 — MANUAL RAG RETRIEVAL
-    # --------------------------------------------------------
-
     if rag:
         with st.spinner(
-            "Step 1/4 — Searching technical manuals..."
+            "Searching manuals first..."
         ):
             results = search_index(
                 rag,
                 topic,
                 get_embedder(),
-                k=8,
+                k=6,
             )
 
             context, relevant = retrieve_context(
                 results,
-                min_score=0.28,
-                max_chunks=5,
-                max_chars=6000,
+                min_score=0.30,
+                max_chunks=3,
+                max_chars=4000,
             )
-
-            st.session_state.last_retrieved = relevant
-    else:
-        st.info(
-            "No FAISS manual index is available. "
-            "The quiz will rely on online technical research "
-            "and the AI's technical knowledge."
-        )
-
-    # --------------------------------------------------------
-    # STEP 2 — ONLINE TECHNICAL RESEARCH
-    # --------------------------------------------------------
-
-    research: dict[str, Any] = {
-        "results": [],
-        "images": [],
-    }
-
-    tavily_key = get_secret(
-        "TAVILY_API_KEY"
-    )
-
-    if tavily_key and run_training_web_research:
-        with st.spinner(
-            "Step 2/4 — Researching reliable technical sources online..."
-        ):
-            try:
-                research = run_training_web_research(
-                    selected_provider(),
-                    "quiz",
-                    topic,
-                    "",
-                    context,
-                    tavily_key,
-                )
-            except Exception as exc:
-                st.warning(
-                    f"Online research could not be completed: {exc}"
-                )
-                research = {
-                    "results": [],
-                    "images": [],
-                }
-    else:
-        if not tavily_key:
-            st.warning(
-                "TAVILY_API_KEY is not configured. "
-                "Online technical research will be skipped."
-            )
-
-    web_sources = (
-        research.get(
-            "results",
-            [],
-        )
-        or []
-    )
-
-    # --------------------------------------------------------
-    # PREPARE WEB RESEARCH TEXT
-    # --------------------------------------------------------
-
-    web_context_parts: list[str] = []
-
-    for index, source in enumerate(
-        web_sources[:10],
-        start=1,
-    ):
-        title = safe_text(
-            source.get(
-                "title",
-                "",
-            )
-        )
-
-        url = safe_text(
-            source.get(
-                "url",
-                "",
-            )
-        )
-
-        content = safe_text(
-            source.get(
-                "content",
-                source.get(
-                    "snippet",
-                    "",
-                ),
-            )
-        )
-
-        if not content:
-            content = safe_text(
-                source.get(
-                    "description",
-                    "",
-                )
-            )
-
-        if title or content:
-            web_context_parts.append(
-                (
-                    f"WEB SOURCE {index}\n"
-                    f"Title: {title}\n"
-                    f"URL: {url}\n"
-                    f"Technical content:\n{content[:2500]}"
-                )
-            )
-
-    web_context = "\n\n".join(
-        web_context_parts
-    )
-
-    # --------------------------------------------------------
-    # STEP 3 — GENERATE QUIZ
-    # --------------------------------------------------------
 
     with st.spinner(
-        "Step 3/4 — Generating technically focused questions..."
+        "Generating quiz and answer key..."
     ):
-        quiz_system_prompt = """
-You are the MarineWise Technical Assessment Agent.
-
-Create a professional marine technician technical assessment.
-
-The requested topic is the PRIMARY constraint.
-
-Every question MUST directly test the requested topic.
-
-IMPORTANT RELEVANCE RULES:
-
-1. Do NOT create a question merely because the topic happens
-   to be mentioned in a source.
-
-2. Every question must test actual technical knowledge,
-   operation, components, diagnosis, maintenance, safety,
-   failure modes, inspection, or troubleshooting that is
-   directly related to the requested topic.
-
-3. Do NOT ask generic marine-engine questions unless they
-   directly relate to the requested topic.
-
-4. Do NOT ask questions about unrelated systems.
-
-5. Do NOT ask questions about the source document itself.
-
-6. Do NOT ask questions such as:
-   - According to the manual...
-   - On page X...
-   - Which manual states...
-   unless the question itself tests useful technical knowledge.
-
-7. Do not invent manufacturer-specific specifications,
-   torque values, pressures, clearances, temperatures,
-   part numbers, or limits.
-
-8. If a manufacturer-specific value is required but is not
-   supported by the supplied evidence, avoid asking for
-   that exact value.
-
-9. Prefer technically meaningful questions over trivia.
-
-10. Use the uploaded manual evidence as the primary source
-    when relevant.
-
-11. Use reliable online technical research as secondary
-    supporting evidence.
-
-12. If a web source is only loosely related to the topic,
-    DO NOT use it to create a question.
-
-13. The requested number of questions MUST be produced.
-
-14. The requested question type MUST be followed exactly.
-
-15. Each question must have one clearly defensible answer.
-
-16. MCQ distractors must be technically plausible but wrong.
-
-17. True-False statements must be technically precise.
-
-18. Short questions must have a concise technically defensible answer.
-
-OUTPUT FORMAT:
-
-QUESTION 1:
-<question>
-
-For MCQ:
-A. <option>
-B. <option>
-C. <option>
-D. <option>
-
-QUESTION 2:
-<question>
-
-...
-
-ANSWER KEY:
-1. <answer>
-2. <answer>
-...
-
-EXPLANATIONS:
-1. <brief technical explanation>
-2. <brief technical explanation>
-...
-
-Do not add an introduction before QUESTION 1.
-Do not put unrelated commentary between questions.
-Do not use markdown tables.
-"""
-
-        quiz_user_prompt = (
-            f"REQUESTED TOPIC:\n"
-            f"{topic}\n\n"
-            f"QUESTION TYPE:\n"
-            f"{qtype}\n\n"
-            f"NUMBER OF QUESTIONS:\n"
-            f"{int(count)}\n\n"
-            f"==================================================\n"
-            f"MANUAL RAG EVIDENCE\n"
-            f"==================================================\n"
-            f"{context or 'No manual evidence available.'}\n\n"
-            f"==================================================\n"
-            f"ONLINE TECHNICAL RESEARCH\n"
-            f"==================================================\n"
-            f"{web_context or 'No online research available.'}\n\n"
-            f"==================================================\n"
-            f"FINAL REQUIREMENT\n"
-            f"==================================================\n"
-            f"Generate exactly {int(count)} {qtype} questions "
-            f"that directly assess: {topic}\n\n"
-            f"Before producing each question, internally verify "
-            f"that the question is specifically about {topic} "
-            f"and not merely associated with it."
-        )
-
         quiz_text = run_agent(
-            quiz_system_prompt,
-            quiz_user_prompt,
+            """
+Create a marine technician training quiz.
+
+Follow the requested question type and count exactly.
+
+Include an ANSWER KEY at the end.
+
+Use supplied manual excerpts where available.
+
+Do not invent manufacturer-specific values.
+""",
+            (
+                f"Topic: {topic}\n"
+                f"Type: {qtype}\n"
+                f"Questions: {count}\n\n"
+                f"MANUAL EXCERPTS:\n{context}"
+            ),
             "training",
         )
 
-    # --------------------------------------------------------
-    # STEP 4 — TECHNICAL REVIEW
-    # --------------------------------------------------------
-
-    with st.spinner(
-        "Step 4/4 — Verifying technical relevance..."
-    ):
-        review_system_prompt = """
-You are the MarineWise Technical Quiz Reviewer.
-
-Review the generated quiz against the requested topic and the
-supplied technical evidence.
-
-Your job is NOT to rewrite the quiz.
-
-Check every question.
-
-A question is VALID only if:
-
-1. It directly tests the requested topic.
-2. It is technically meaningful.
-3. It is not merely based on a source mentioning the topic.
-4. It is not unrelated marine-engine knowledge.
-5. The answer is technically defensible.
-6. It does not rely on an unsupported manufacturer-specific value.
-7. MCQ questions have one clearly correct answer.
-8. True/False questions are technically unambiguous.
-9. Short questions have a defensible answer.
-10. The requested question count and type are satisfied.
-
-Return exactly this structure:
-
-VALID: YES
-or
-VALID: NO
-
-PROBLEMS:
-- <problem 1>
-- <problem 2>
-
-REPAIR INSTRUCTIONS:
-- <specific instructions for correcting invalid questions>
-
-If all questions are technically relevant and valid,
-return VALID: YES.
-"""
-
-        review_user_prompt = (
-            f"REQUESTED TOPIC:\n"
-            f"{topic}\n\n"
-            f"QUESTION TYPE:\n"
-            f"{qtype}\n\n"
-            f"REQUESTED COUNT:\n"
-            f"{int(count)}\n\n"
-            f"MANUAL EVIDENCE:\n"
-            f"{context or 'None'}\n\n"
-            f"ONLINE TECHNICAL EVIDENCE:\n"
-            f"{web_context or 'None'}\n\n"
-            f"GENERATED QUIZ:\n"
-            f"{quiz_text}"
-        )
-
-        review_text = run_agent(
-            review_system_prompt,
-            review_user_prompt,
-            "training",
-        )
-
-    # --------------------------------------------------------
-    # REGENERATE IF REVIEW FAILS
-    # --------------------------------------------------------
-
-    if "VALID: NO" in review_text.upper():
-        with st.spinner(
-            "Improving questions that failed the technical review..."
-        ):
-            repair_system_prompt = """
-You are the MarineWise Technical Assessment Agent.
-
-Regenerate the quiz using the reviewer's feedback.
-
-The requested topic is the strict primary constraint.
-Every question must directly test the requested topic.
-
-Do not use questions merely because a source mentions the
-requested topic.
-
-Remove unrelated questions.
-
-Keep the requested question type and exact question count.
-
-Do not invent unsupported manufacturer-specific values.
-
-Output ONLY:
-
-QUESTION 1:
-...
-
-QUESTION 2:
-...
-
-ANSWER KEY:
-1. ...
-2. ...
-
-EXPLANATIONS:
-1. ...
-2. ...
-
-No introduction.
-No conclusion.
-No review commentary.
-"""
-
-            repair_user_prompt = (
-                f"REQUESTED TOPIC:\n"
-                f"{topic}\n\n"
-                f"QUESTION TYPE:\n"
-                f"{qtype}\n\n"
-                f"QUESTION COUNT:\n"
-                f"{int(count)}\n\n"
-                f"MANUAL EVIDENCE:\n"
-                f"{context or 'None'}\n\n"
-                f"ONLINE TECHNICAL RESEARCH:\n"
-                f"{web_context or 'None'}\n\n"
-                f"ORIGINAL QUIZ:\n"
-                f"{quiz_text}\n\n"
-                f"TECHNICAL REVIEW:\n"
-                f"{review_text}\n\n"
-                f"Regenerate the complete quiz now."
-            )
-
-            quiz_text = run_agent(
-                repair_system_prompt,
-                repair_user_prompt,
-                "training",
-            )
-
-    # --------------------------------------------------------
-    # DISPLAY
-    # --------------------------------------------------------
-
     st.markdown(
-        "### Technical Quiz"
-    )
-
-    st.markdown(
-        f"**Topic:** {topic}"
+        "### Quiz"
     )
 
     st.write(
         quiz_text
     )
 
-    # --------------------------------------------------------
-    # DOWNLOAD PDF
-    # --------------------------------------------------------
-
-    pdf_bytes = make_quiz_pdf(
-        topic,
-        qtype,
-        quiz_text,
-    )
-
     st.download_button(
-        "Download Technical Assessment / Quiz PDF",
-        pdf_bytes,
-        "marinewise_technical_assessment_quiz.pdf",
+        "Download Quiz PDF",
+        make_quiz_pdf(
+            topic,
+            qtype,
+            quiz_text,
+        ),
+        "marinewise_quiz.pdf",
         "application/pdf",
-        use_container_width=True,
     )
 
-    # --------------------------------------------------------
-    # SOURCES
-    # --------------------------------------------------------
+    render_sources(
+        relevant
+    )
 
-    if relevant:
-        st.markdown(
-            "### Manual Sources Used"
+
+# ============================================================
+# ASSESSMENT
+# ============================================================
+
+
+def configure_tesseract() -> str | None:
+    """
+    Locate the Tesseract executable on local Windows/Linux systems.
+
+    Streamlit Cloud should provide Tesseract through packages.txt.
+    """
+    import shutil
+
+    try:
+        import pytesseract
+    except ImportError:
+        return None
+
+    detected = shutil.which("tesseract")
+
+    candidates = [
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        "/usr/bin/tesseract",
+        "/usr/local/bin/tesseract",
+    ]
+
+    executable = detected or next(
+        (
+            path
+            for path in candidates
+            if os.path.exists(path)
+        ),
+        None,
+    )
+
+    if executable:
+        pytesseract.pytesseract.tesseract_cmd = executable
+
+    return executable
+
+
+def extract_assessment_images(
+    uploaded_files: list[Any],
+) -> str:
+    """
+    OCR all uploaded assessment pages in upload order.
+
+    The assessment can contain 1–7 JPG/PNG pages. Each page is
+    normalized before OCR and clearly labelled in the combined text.
+    """
+    import pytesseract
+
+    extracted_pages: list[str] = []
+
+    for page_number, uploaded_file in enumerate(
+        uploaded_files,
+        start=1,
+    ):
+        image = Image.open(
+            io.BytesIO(uploaded_file.getvalue())
         )
-        render_sources(
-            relevant
+
+        image = ImageOps.exif_transpose(
+            image
+        ).convert("RGB")
+
+        image.thumbnail(
+            (2600, 2600),
+            Image.Resampling.LANCZOS,
         )
 
-    if web_sources:
-        st.markdown(
-            "### Online Technical Sources"
+        gray = ImageOps.grayscale(
+            image
         )
 
-        for source in web_sources[:10]:
-            title = safe_text(
-                source.get(
-                    "title",
-                    "Technical source",
-                )
-            )
+        gray = ImageOps.autocontrast(
+            gray
+        )
 
-            url = safe_text(
-                source.get(
-                    "url",
-                    "",
-                )
-            )
+        text = pytesseract.image_to_string(
+            gray,
+            config="--psm 6",
+        ).strip()
 
-            if url:
-                st.markdown(
-                    f"- [{title}]({url})"
-                )
-            else:
-                st.markdown(
-                    f"- {title}"
-                )
+        extracted_pages.append(
+            f"===== ASSESSMENT PAGE {page_number}: "
+            f"{uploaded_file.name} =====\n"
+            f"{text or '[No OCR text detected on this page.]'}"
+        )
 
+    return "\n\n".join(
+        extracted_pages
+    )
 
 
 def assessment_page() -> None:
@@ -3794,16 +3469,26 @@ def assessment_page() -> None:
     )
 
     st.caption(
-        "Upload a clear assessment image and provide its answer key."
+        "Upload 1–7 assessment pages/images together. "
+        "The pages are processed in upload order."
+    )
+
+    engine = st.text_input(
+        "Engine / Manufacturer (optional)",
+        placeholder="Example: MTU 16V 4000 M90 / Caterpillar C32",
+        key="assessment_engine",
     )
 
     uploaded = st.file_uploader(
-        "Assessment image",
+        "Assessment pages",
         type=[
             "jpg",
             "jpeg",
             "png",
         ],
+        accept_multiple_files=True,
+        key="assessment_images",
+        help="Select up to 7 assessment images/pages at once.",
     )
 
     answer_key = st.text_area(
@@ -3811,41 +3496,74 @@ def assessment_page() -> None:
         placeholder=(
             "Example: 1=A, 2=C, 3=True, 4=B"
         ),
+        key="assessment_answer_key",
     )
 
-    if uploaded and st.button(
-        "Score Assessment",
-        type="primary",
-    ):
-        with st.spinner(
-            "Reading the assessment image..."
-        ):
-            try:
-                import pytesseract
+    if uploaded and len(uploaded) > 7:
+        st.error(
+            "Please upload no more than 7 assessment pages."
+        )
+        return
 
+    if uploaded:
+        st.markdown("### Assessment Pages")
+
+        preview_columns = st.columns(
+            min(len(uploaded), 4)
+        )
+
+        for index, uploaded_file in enumerate(
+            uploaded,
+            start=1,
+        ):
+            with preview_columns[(index - 1) % len(preview_columns)]:
                 image = Image.open(
-                    uploaded
-                ).convert("RGB")
+                    io.BytesIO(uploaded_file.getvalue())
+                )
+                image = ImageOps.exif_transpose(
+                    image
+                )
 
                 st.image(
                     image,
-                    caption="Uploaded assessment",
-                    width=500,
+                    caption=(
+                        f"Page {index}: "
+                        f"{uploaded_file.name}"
+                    ),
+                    use_container_width=True,
                 )
 
-                extracted = (
-                    pytesseract.image_to_string(
-                        image
-                    )
-                )
+    if not uploaded:
+        return
 
-            except ImportError:
-                st.error(
-                    "OCR is not installed. "
-                    "Install Tesseract OCR and pytesseract."
-                )
-                return
+    if st.button(
+        "Score Assessment",
+        type="primary",
+        key="score_assessment_button",
+    ):
+        if not answer_key.strip():
+            st.warning(
+                "Add an answer key so the app can calculate the assessment score."
+            )
+            return
 
+        executable = configure_tesseract()
+
+        if not executable:
+            st.error(
+                "Tesseract OCR could not be found. "
+                "Install Tesseract OCR on your computer, or add "
+                "tesseract-ocr to packages.txt for Streamlit Cloud."
+            )
+            return
+
+        with st.spinner(
+            f"Reading all {len(uploaded)} assessment page(s)..."
+        ):
+            try:
+                extracted = extract_assessment_images(
+                    uploaded
+                )
             except Exception as exc:
                 st.error(
                     f"OCR could not run: {exc}"
@@ -3855,17 +3573,12 @@ def assessment_page() -> None:
         st.text_area(
             "OCR text — check this before scoring",
             extracted,
-            height=250,
+            height=350,
+            key="assessment_ocr_text",
         )
 
-        if not answer_key.strip():
-            st.warning(
-                "Add an answer key so the app can calculate a defensible score."
-            )
-            return
-
         with st.spinner(
-            "Scoring assessment..."
+            "Scoring the complete assessment..."
         ):
             score = score_with_agent(
                 extracted,
@@ -3876,56 +3589,361 @@ def assessment_page() -> None:
             "### Assessment Result"
         )
 
+        score_col, topic_col = st.columns([1, 2])
+
+        with score_col:
+            st.metric(
+                "Technician Score",
+                f"{score['score']:.0f}%",
+            )
+
+        with topic_col:
+            if score.get("missed_topics"):
+                st.markdown(
+                    "**Improvement areas identified:** "
+                    + ", ".join(score["missed_topics"])
+                )
+
         st.write(
             score["feedback"]
         )
 
-        st.metric(
-            "Score",
-            f"{score['score']:.0f}%",
+        if score["score"] >= 50:
+            st.success(
+                "Assessment is at or above 50%. "
+                "No remedial package was automatically generated."
+            )
+            render_sources([])
+            return
+
+        st.warning(
+            "Below 50% — a targeted technician retraining package is recommended."
         )
 
-        if score["score"] < 50:
-            st.warning(
-                "Below 50% — remedial training is recommended."
-            )
+        missed_topics = score.get(
+            "missed_topics",
+            [],
+        )
 
+        if not missed_topics:
+            missed_topics = [
+                "Topics associated with incorrect or unanswered assessment questions"
+            ]
+
+        remedial_topic = ", ".join(
+            missed_topics[:8]
+        )
+
+        # ----------------------------------------------------
+        # TARGETED MANUAL RETRIEVAL
+        # ----------------------------------------------------
+
+        rag = st.session_state.get(
+            "rag"
+        )
+
+        context = ""
+        relevant: list[dict[str, Any]] = []
+
+        if rag:
             with st.spinner(
-                "Generating remedial presentation..."
+                "Finding manual sections specifically related to the technician's missed topics..."
             ):
-                remedial = run_agent(
-                    """
-Create a short remedial marine technician training
-presentation outline based only on the assessment mistakes.
-
-Include:
-- 5–7 slides
-- explanations
-- practice checks
-- final retest
-
-Do not invent technical values.
-""",
-                    (
-                        f"Assessment OCR:\n{extracted}\n\n"
-                        f"Answer key:\n{answer_key}\n\n"
-                        f"Scoring feedback:\n"
-                        f"{score['feedback']}"
-                    ),
-                    "training",
+                rag_query = (
+                    f"{engine.strip()}\n"
+                    f"{remedial_topic}\n"
+                    "technician assessment mistakes troubleshooting training"
                 )
 
-            st.download_button(
-                "Download Remedial Training PPT",
-                make_remedial_ppt(
-                    remedial
-                ),
-                "marinewise_remedial_training.pptx",
+                results = search_index(
+                    rag,
+                    rag_query,
+                    get_embedder(),
+                    k=10,
+                )
+
+                context, relevant = retrieve_context(
+                    results,
+                    min_score=0.25,
+                    max_chunks=8,
+                    max_chars=8000,
+                )
+
+                st.session_state.last_retrieved = relevant
+
+        # ----------------------------------------------------
+        # TARGETED WEB RESEARCH
+        # ----------------------------------------------------
+
+        research: dict[str, Any] = {
+            "results": [],
+            "images": [],
+        }
+
+        tavily_key = get_secret(
+            "TAVILY_API_KEY"
+        )
+
+        if (
+            tavily_key
+            and run_training_web_research is not None
+        ):
+            with st.spinner(
+                "Researching the missed technical areas using reliable technical sources..."
+            ):
+                research = run_training_web_research(
+                    selected_provider(),
+                    engine.strip() or "Marine engine",
+                    remedial_topic,
+                    "",
+                    context,
+                    tavily_key,
+                )
+
+        web_sources = research.get(
+            "results",
+            [],
+        ) or []
+
+        # ----------------------------------------------------
+        # TARGETED RETRAINING CONTENT
+        # ----------------------------------------------------
+
+        with st.spinner(
+            "Building a targeted retraining package from the technician's actual mistakes..."
+        ):
+            remedial_content = run_agent(
+                """
+You are a senior marine technical training instructor preparing a
+REMEDIAL TRAINING PACKAGE for a technician who scored below 50%.
+
+The technician's MISSED TOPICS are the primary constraint.
+
+Your job is NOT to create generic marine training. Teach only the
+technical areas that the assessment shows the technician needs to improve.
+
+SOURCE PRIORITY:
+1. Supplied manufacturer/manual excerpts are the primary source.
+2. Web research is secondary supporting evidence only.
+3. If a detail is not supported by the supplied manual or reliable web
+   evidence, do not invent a manufacturer-specific value or procedure.
+
+For every missed area:
+- explain the concept clearly
+- explain why it matters to a marine technician
+- identify the relevant components/functions
+- explain the correct diagnostic or inspection logic where supported
+- identify common technician mistakes
+- provide corrective learning points
+- provide a short practice check
+
+Finish with:
+- a practical knowledge check
+- a final retest section directly related to the missed topics
+
+Do not include unrelated systems or topics merely to make the package longer.
+Clearly distinguish manual-supported information from secondary web-supported
+information when they differ or when the manual does not cover a point.
+""",
                 (
-                    "application/vnd.openxmlformats-officedocument."
-                    "presentationml.presentation"
+                    f"ENGINE / MANUFACTURER:\n"
+                    f"{engine.strip() or 'Not specified'}\n\n"
+                    f"TECHNICIAN SCORE:\n"
+                    f"{score['score']:.0f}%\n\n"
+                    f"MISSED TOPICS:\n"
+                    f"{remedial_topic}\n\n"
+                    f"SCORING FEEDBACK:\n"
+                    f"{score['feedback']}\n\n"
+                    f"OCR FROM ALL ASSESSMENT PAGES:\n"
+                    f"{extracted}\n\n"
+                    f"ANSWER KEY:\n"
+                    f"{answer_key}\n\n"
+                    f"PRIMARY MANUAL EXCERPTS:\n"
+                    f"{context}\n\n"
+                    f"SECONDARY WEB RESEARCH:\n"
+                    f"{web_sources[:8]}"
                 ),
+                "training",
             )
+
+        st.markdown(
+            "### Targeted Retraining Package"
+        )
+
+        st.write(
+            remedial_content
+        )
+
+        # ----------------------------------------------------
+        # TARGETED DIAGRAM
+        # ----------------------------------------------------
+
+        diagram = make_training_diagram(
+            engine.strip() or "Marine engine",
+            remedial_topic,
+        )
+
+        st.markdown(
+            "### Targeted Training Diagram"
+        )
+
+        st.image(
+            diagram,
+            caption=(
+                "Training diagram for the identified improvement areas. "
+                "Verify engine-specific architecture against the current manual."
+            ),
+            use_container_width=True,
+        )
+
+        # ----------------------------------------------------
+        # TARGETED PROFESSIONAL PPT
+        # ----------------------------------------------------
+
+        remedial_plan: list[dict[str, Any]] = []
+
+        if generate_training_presentation_plan is not None:
+            with st.spinner(
+                "Creating the targeted professional PowerPoint plan..."
+            ):
+                plan_raw = generate_training_presentation_plan(
+                    selected_provider(),
+                    engine.strip() or "Marine engine",
+                    "",
+                    remedial_topic,
+                    context,
+                    research,
+                )
+
+                remedial_plan = parse_training_plan(
+                    plan_raw
+                )
+
+        if not remedial_plan:
+            remedial_plan = [
+                {
+                    "title": "Assessment Findings",
+                    "purpose": "Identify improvement areas",
+                    "bullets": [
+                        f"Technician score: {score['score']:.0f}%",
+                        f"Missed areas: {remedial_topic}",
+                    ],
+                    "visual_type": "none",
+                },
+                {
+                    "title": "Targeted Technical Retraining",
+                    "purpose": "Correct knowledge gaps",
+                    "bullets": split_text(
+                        remedial_content,
+                        180,
+                    )[:5],
+                    "visual_type": "none",
+                },
+                {
+                    "title": "Practice & Final Retest",
+                    "purpose": "Confirm improvement",
+                    "bullets": [
+                        "Review each missed topic.",
+                        "Explain the correct diagnostic reasoning.",
+                        "Complete the final retest.",
+                    ],
+                    "visual_type": "process",
+                },
+            ]
+
+        ppt_bytes = make_professional_training_ppt(
+            engine.strip() or "Marine engine",
+            "",
+            f"Remedial Training — {remedial_topic}",
+            remedial_plan,
+            get_manual_page_images(
+                rag,
+                relevant,
+            ),
+            [],
+            relevant,
+            web_sources,
+        )
+
+        # ----------------------------------------------------
+        # DOWNLOADS: PDF / WORD / PPT
+        # ----------------------------------------------------
+
+        st.markdown(
+            "### Download Targeted Retraining Package"
+        )
+
+        download_columns = st.columns(3)
+
+        download_columns[0].download_button(
+            "⬇ Download Remedial PDF",
+            make_training_pdf(
+                engine.strip() or "Marine engine",
+                "",
+                f"Remedial Training — {remedial_topic}",
+                remedial_content,
+                relevant,
+                diagram,
+            ),
+            "marinewise_targeted_remedial_training.pdf",
+            "application/pdf",
+            use_container_width=True,
+        )
+
+        download_columns[1].download_button(
+            "⬇ Download Remedial Word",
+            make_training_docx(
+                engine.strip() or "Marine engine",
+                "",
+                f"Remedial Training — {remedial_topic}",
+                remedial_content,
+                diagram,
+            ),
+            "marinewise_targeted_remedial_training.docx",
+            (
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            use_container_width=True,
+        )
+
+        download_columns[2].download_button(
+            "⬇ Download Remedial PowerPoint",
+            ppt_bytes,
+            "marinewise_targeted_remedial_training.pptx",
+            (
+                "application/vnd.openxmlformats-officedocument."
+                "presentationml.presentation"
+            ),
+            use_container_width=True,
+        )
+
+        render_sources(
+            relevant
+        )
+
+        if web_sources:
+            st.markdown(
+                "**Secondary web research used:**"
+            )
+
+            for source in web_sources[:8]:
+                title = safe_text(
+                    source.get("title")
+                )
+                url = safe_text(
+                    source.get("url")
+                )
+
+                if title:
+                    st.markdown(
+                        f"- {title}"
+                        + (
+                            f" — {url}"
+                            if url
+                            else ""
+                        )
+                    )
 
 
 def score_with_agent(
@@ -3934,19 +3952,34 @@ def score_with_agent(
 ) -> dict[str, Any]:
     raw = run_agent(
         """
-Score a technician assessment.
+Score a marine technician assessment.
 
-Return exactly three lines:
+The assessment may contain multiple OCR pages. Use ALL pages together.
+
+Return exactly three labelled sections:
 
 SCORE_PERCENT: number
 FEEDBACK: concise explanation
 MISSED_TOPICS: comma-separated topics
 
-Do not guess unreadable answers.
+Rules:
+1. Compare the technician's answers against the supplied answer key.
+2. Calculate the score from the supplied answer key.
+3. Do not guess unreadable answers.
+4. If an answer is unreadable, identify it as unreadable rather than
+   marking it correct.
+5. Identify the technical topic associated with each wrong or unanswered
+   question.
+6. MISSED_TOPICS must contain only areas where the technician needs
+   improvement.
+7. Keep topics specific enough to drive targeted retraining.
+8. Do not include unrelated marine topics.
 """,
         (
-            f"OCR answers:\n{extracted}\n\n"
-            f"Answer key:\n{answer_key}"
+            f"OCR ANSWERS FROM ALL ASSESSMENT PAGES:\n"
+            f"{extracted}\n\n"
+            f"ANSWER KEY:\n"
+            f"{answer_key}"
         ),
         "training",
     )
@@ -3981,6 +4014,23 @@ Do not guess unreadable answers.
     else:
         feedback = raw
 
+    missed_topics: list[str] = []
+
+    if "MISSED_TOPICS:" in raw:
+        topic_text = raw.split(
+            "MISSED_TOPICS:",
+            1,
+        )[1].strip()
+
+        missed_topics = [
+            item.strip(" -•")
+            for item in re.split(
+                r",|\n",
+                topic_text,
+            )
+            if item.strip()
+        ]
+
     return {
         "score": max(
             0.0,
@@ -3990,6 +4040,7 @@ Do not guess unreadable answers.
             ),
         ),
         "feedback": feedback,
+        "missed_topics": missed_topics[:8],
     }
 
 
@@ -4278,23 +4329,12 @@ def make_quiz_pdf(
     qtype: str,
     text: str,
 ) -> bytes:
-    import os
-    import re
-    import io
-
-    from reportlab.lib import colors
-    from reportlab.lib.enums import TA_CENTER
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import ParagraphStyle
-    from reportlab.lib.units import mm
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.platypus import (
-        SimpleDocTemplate,
         Paragraph,
+        SimpleDocTemplate,
         Spacer,
-        PageBreak,
-        KeepTogether,
     )
 
     output = io.BytesIO()
@@ -4302,607 +4342,42 @@ def make_quiz_pdf(
     document = SimpleDocTemplate(
         output,
         pagesize=A4,
-        rightMargin=22 * mm,
-        leftMargin=22 * mm,
-        topMargin=20 * mm,
-        bottomMargin=20 * mm,
-        title="Technical Assessment / Quiz",
-        author="MarineWise AI",
+        rightMargin=36,
+        leftMargin=36,
+        topMargin=36,
+        bottomMargin=36,
     )
 
-    # --------------------------------------------------------
-    # FONT
-    # --------------------------------------------------------
+    styles = getSampleStyleSheet()
 
-    font_name = "Times-Roman"
-    font_bold = "Times-Bold"
-
-    times_regular_paths = [
-        r"C:\Windows\Fonts\times.ttf",
-        r"C:\Windows\Fonts\Times_New_Roman.ttf",
+    story = [
+        Paragraph(
+            "MarineWise AI — Technician Quiz",
+            styles["Title"],
+        ),
+        Paragraph(
+            safe_paragraph(
+                f"Topic: {topic} | "
+                f"Type: {qtype}"
+            ),
+            styles["Heading2"],
+        ),
+        Spacer(1, 10),
     ]
 
-    times_bold_paths = [
-        r"C:\Windows\Fonts\timesbd.ttf",
-        r"C:\Windows\Fonts\Times_New_Roman_Bold.ttf",
-    ]
-
-    for path in times_regular_paths:
-        if os.path.exists(path):
-            try:
-                pdfmetrics.registerFont(
-                    TTFont(
-                        "MarineWiseTimes",
-                        path,
-                    )
-                )
-                font_name = "MarineWiseTimes"
-                break
-            except Exception:
-                pass
-
-    for path in times_bold_paths:
-        if os.path.exists(path):
-            try:
-                pdfmetrics.registerFont(
-                    TTFont(
-                        "MarineWiseTimesBold",
-                        path,
-                    )
-                )
-                font_bold = "MarineWiseTimesBold"
-                break
-            except Exception:
-                pass
-
-    # --------------------------------------------------------
-    # CLEAN TEXT
-    # --------------------------------------------------------
-
-    def clean_pdf_text(value: Any) -> str:
-        value = str(
-            value or ""
-        )
-
-        replacements = {
-            "\u25a0": "",
-            "\u25aa": "",
-            "\u25ab": "",
-            "\u25cf": "",
-            "\u2022": "",
-            "\u00a0": " ",
-            "\u200b": "",
-            "\u200c": "",
-            "\u200d": "",
-            "\ufeff": "",
-            "\u2013": "-",
-            "\u2014": "-",
-            "\u2018": "'",
-            "\u2019": "'",
-            "\u201c": '"',
-            "\u201d": '"',
-            "\u2026": "...",
-            "\u2192": "->",
-            "\u2190": "<-",
-            "\u00b0": " degrees",
-        }
-
-        for old, new in replacements.items():
-            value = value.replace(
-                old,
-                new,
-            )
-
-        value = "".join(
-            char
-            for char in value
-            if char == "\n"
-            or char == "\t"
-            or ord(char) >= 32
-        )
-
-        value = re.sub(
-            r"[ \t]+",
-            " ",
-            value,
-        )
-
-        value = re.sub(
-            r"\n{3,}",
-            "\n\n",
-            value,
-        )
-
-        return value.strip()
-
-    def pdf_paragraph_text(value: str) -> str:
-        value = clean_pdf_text(
-            value
-        )
-
-        return (
-            value
-            .replace(
-                "&",
-                "&amp;",
-            )
-            .replace(
-                "<",
-                "&lt;",
-            )
-            .replace(
-                ">",
-                "&gt;",
-            )
-            .replace(
-                "\n",
-                "<br/>",
-            )
-        )
-
-    # --------------------------------------------------------
-    # STYLES
-    # --------------------------------------------------------
-
-    title_style = ParagraphStyle(
-        "QuizTitle",
-        fontName=font_bold,
-        fontSize=18,
-        leading=22,
-        alignment=TA_CENTER,
-        textColor=colors.black,
-        spaceAfter=8,
-    )
-
-    topic_style = ParagraphStyle(
-        "QuizTopic",
-        fontName=font_bold,
-        fontSize=14,
-        leading=18,
-        alignment=TA_CENTER,
-        textColor=colors.black,
-        spaceAfter=12,
-    )
-
-    meta_style = ParagraphStyle(
-        "QuizMeta",
-        fontName=font_name,
-        fontSize=11,
-        leading=15,
-        alignment=TA_CENTER,
-        textColor=colors.black,
-        spaceAfter=14,
-    )
-
-    question_style = ParagraphStyle(
-        "QuizQuestion",
-        fontName=font_bold,
-        fontSize=14,
-        leading=19,
-        alignment=0,
-        textColor=colors.black,
-        spaceBefore=8,
-        spaceAfter=7,
-    )
-
-    option_style = ParagraphStyle(
-        "QuizOption",
-        fontName=font_name,
-        fontSize=14,
-        leading=19,
-        alignment=0,
-        textColor=colors.black,
-        leftIndent=14,
-        spaceAfter=4,
-    )
-
-    answer_style = ParagraphStyle(
-        "QuizAnswer",
-        fontName=font_bold,
-        fontSize=14,
-        leading=19,
-        alignment=0,
-        textColor=colors.black,
-        spaceBefore=5,
-        spaceAfter=6,
-    )
-
-    explanation_style = ParagraphStyle(
-        "QuizExplanation",
-        fontName=font_name,
-        fontSize=12,
-        leading=17,
-        alignment=0,
-        textColor=colors.black,
-        leftIndent=12,
-        spaceAfter=8,
-    )
-
-    answer_heading_style = ParagraphStyle(
-        "AnswerHeading",
-        fontName=font_bold,
-        fontSize=16,
-        leading=20,
-        alignment=TA_CENTER,
-        textColor=colors.black,
-        spaceAfter=14,
-    )
-
-    # --------------------------------------------------------
-    # PARSE GENERATED QUIZ
-    # --------------------------------------------------------
-
-    cleaned = clean_pdf_text(
-        text
-    )
-
-    cleaned = re.sub(
-        r"(?im)^\s*#+\s*ANSWER\s+KEY\s*:?\s*$",
-        "ANSWER KEY:",
-        cleaned,
-    )
-
-    cleaned = re.sub(
-        r"(?im)^\s*#+\s*EXPLANATIONS?\s*:?\s*$",
-        "EXPLANATIONS:",
-        cleaned,
-    )
-
-    answer_key_match = re.search(
-        r"(?im)^\s*ANSWER\s+KEY\s*:?\s*$",
-        cleaned,
-    )
-
-    explanations_match = re.search(
-        r"(?im)^\s*EXPLANATIONS?\s*:?\s*$",
-        cleaned,
-    )
-
-    if answer_key_match:
-        questions_part = cleaned[
-            :answer_key_match.start()
-        ]
-        remaining = cleaned[
-            answer_key_match.end():
-        ]
-    else:
-        questions_part = cleaned
-        remaining = ""
-
-    if explanations_match and (
-        not answer_key_match
-        or explanations_match.start()
-        >= answer_key_match.end()
+    for part in split_text(
+        text,
+        1500,
     ):
-        relative_start = (
-            explanations_match.start()
-            - (
-                answer_key_match.end()
-                if answer_key_match
-                else 0
-            )
-        )
-
-        answer_part = remaining[
-            :relative_start
-        ]
-
-        explanation_part = remaining[
-            relative_start
-            + len(
-                explanations_match.group(0)
-            ):]
-    else:
-        answer_part = remaining
-        explanation_part = ""
-
-    # --------------------------------------------------------
-    # QUESTION PARSER
-    # --------------------------------------------------------
-
-    question_pattern = re.compile(
-        r"(?im)"
-        r"^\s*(?:QUESTION\s*)?"
-        r"(\d+)"
-        r"\s*[:.)-]\s*"
-        r"(.*?)(?="
-        r"^\s*(?:QUESTION\s*)?"
-        r"\d+"
-        r"\s*[:.)-]"
-        r"|\Z)",
-        re.MULTILINE
-        | re.DOTALL,
-    )
-
-    question_matches = list(
-        question_pattern.finditer(
-            questions_part
-        )
-    )
-
-    questions: list[dict[str, Any]] = []
-
-    for match in question_matches:
-        number = match.group(1)
-        body = clean_pdf_text(
-            match.group(2)
-        )
-
-        if not body:
-            continue
-
-        option_matches = list(
-            re.finditer(
-                r"(?im)(?:^|\n)\s*"
-                r"([A-D])\s*[\.\):\-]\s*"
-                r"(.*?)(?="
-                r"\n\s*[A-D]\s*[\.\):\-]\s*"
-                r"|\Z)",
-                body,
-                re.DOTALL,
-            )
-        )
-
-        options: list[str] = []
-
-        if option_matches:
-            first_option_position = option_matches[0].start()
-            question_text = clean_pdf_text(
-                body[
-                    :first_option_position
-                ]
-            )
-
-            for option_match in option_matches:
-                letter = option_match.group(1)
-                option_text = clean_pdf_text(
-                    option_match.group(2)
-                )
-                options.append(
-                    f"{letter}. {option_text}"
-                )
-        else:
-            question_text = body
-
-        questions.append(
-            {
-                "number": number,
-                "question": question_text,
-                "options": options,
-            }
-        )
-
-    if not questions:
-        raw_blocks = [
-            block.strip()
-            for block in re.split(
-                r"\n\s*\n",
-                questions_part,
-            )
-            if block.strip()
-        ]
-
-        for index, block in enumerate(
-            raw_blocks,
-            start=1,
-        ):
-            questions.append(
-                {
-                    "number": str(index),
-                    "question": clean_pdf_text(
-                        block
-                    ),
-                    "options": [],
-                }
-            )
-
-    # --------------------------------------------------------
-    # PARSE ANSWERS
-    # --------------------------------------------------------
-
-    answers: dict[str, str] = {}
-
-    for line in answer_part.splitlines():
-        line = clean_pdf_text(
-            line
-        )
-
-        match = re.match(
-            r"^\s*(\d+)\s*[\.\):\-]\s*(.+)$",
-            line,
-        )
-
-        if match:
-            answers[
-                match.group(1)
-            ] = match.group(2).strip()
-
-    # --------------------------------------------------------
-    # PARSE EXPLANATIONS
-    # --------------------------------------------------------
-
-    explanations: dict[str, str] = {}
-    current_number: str | None = None
-
-    for line in explanation_part.splitlines():
-        line = clean_pdf_text(
-            line
-        )
-
-        if not line:
-            continue
-
-        match = re.match(
-            r"^\s*(\d+)\s*[\.\):\-]\s*(.*)$",
-            line,
-        )
-
-        if match:
-            current_number = match.group(1)
-            explanations[
-                current_number
-            ] = match.group(2).strip()
-        elif current_number:
-            explanations[
-                current_number
-            ] += " " + line
-
-    # --------------------------------------------------------
-    # BUILD PDF
-    # --------------------------------------------------------
-
-    story: list[Any] = []
-
-    story.append(
-        Paragraph(
-            "Technical Assessment / Quiz",
-            title_style,
-        )
-    )
-
-    story.append(
-        Paragraph(
-            pdf_paragraph_text(
-                topic
-            ),
-            topic_style,
-        )
-    )
-
-    story.append(
-        Paragraph(
-            pdf_paragraph_text(
-                f"Question Type: {qtype}    |    "
-                f"Number of Questions: {len(questions)}"
-            ),
-            meta_style,
-        )
-    )
-
-    story.append(
-        Spacer(
-            1,
-            5,
-        )
-    )
-
-    # --------------------------------------------------------
-    # QUESTIONS
-    # --------------------------------------------------------
-
-    for question in questions:
-        number = question[
-            "number"
-        ]
-        question_text = question[
-            "question"
-        ]
-        options = question[
-            "options"
-        ]
-
-        question_block: list[Any] = []
-
-        question_block.append(
-            Paragraph(
-                pdf_paragraph_text(
-                    f"{number}. {question_text}"
+        story.extend(
+            [
+                Paragraph(
+                    safe_paragraph(part),
+                    styles["BodyText"],
                 ),
-                question_style,
-            )
-        )
-
-        for option in options:
-            question_block.append(
-                Paragraph(
-                    pdf_paragraph_text(
-                        option
-                    ),
-                    option_style,
-                )
-            )
-
-        story.append(
-            KeepTogether(
-                question_block
-            )
-        )
-
-        story.append(
-            Spacer(
-                1,
-                5,
-            )
-        )
-
-    # --------------------------------------------------------
-    # ANSWER KEY — ALWAYS NEW PAGE
-    # --------------------------------------------------------
-
-    story.append(
-        PageBreak()
-    )
-
-    story.append(
-        Paragraph(
-            "ANSWER KEY",
-            answer_heading_style,
-        )
-    )
-
-    if answers:
-        for number in sorted(
-            answers.keys(),
-            key=lambda value: int(value)
-            if value.isdigit()
-            else 9999,
-        ):
-            answer = answers[
-                number
+                Spacer(1, 8),
             ]
-
-            story.append(
-                Paragraph(
-                    pdf_paragraph_text(
-                        f"{number}. {answer}"
-                    ),
-                    answer_style,
-                )
-            )
-
-            if number in explanations:
-                story.append(
-                    Paragraph(
-                        pdf_paragraph_text(
-                            "Explanation: "
-                            + explanations[number]
-                        ),
-                        explanation_style,
-                    )
-                )
-    else:
-        fallback_answer_text = (
-            answer_part.strip()
-            or "No answer key was generated."
         )
-
-        for paragraph in re.split(
-            r"\n\s*\n",
-            fallback_answer_text,
-        ):
-            paragraph = clean_pdf_text(
-                paragraph
-            )
-
-            if paragraph:
-                story.append(
-                    Paragraph(
-                        pdf_paragraph_text(
-                            paragraph
-                        ),
-                        answer_style,
-                    )
-                )
 
     document.build(
         story
@@ -4910,6 +4385,79 @@ def make_quiz_pdf(
 
     return output.getvalue()
 
+
+def make_remedial_ppt(
+    text: str,
+) -> bytes:
+    from pptx import Presentation
+    from pptx.dml.color import RGBColor
+    from pptx.util import Inches, Pt
+
+    prs = Presentation()
+
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+
+    parts = split_text(
+        text,
+        950,
+    )
+
+    for index, part in enumerate(
+        parts[:8],
+        start=1,
+    ):
+        slide = prs.slides.add_slide(
+            prs.slide_layouts[6]
+        )
+
+        add_slide_background(
+            slide
+        )
+
+        add_top_bar(
+            slide,
+            f"Remedial Training — Part {index}",
+            "Remedial",
+        )
+
+        box = slide.shapes.add_textbox(
+            Inches(0.75),
+            Inches(1.4),
+            Inches(11.8),
+            Inches(5.2),
+        )
+
+        tf = box.text_frame
+
+        tf.text = part
+
+        for paragraph in tf.paragraphs:
+            paragraph.font.size = Pt(18)
+            paragraph.font.color.rgb = (
+                RGBColor.from_string(
+                    DARK
+                )
+            )
+
+        add_footer(
+            slide,
+            index,
+            "MarineWise AI — Remedial Training",
+        )
+
+    output = io.BytesIO()
+
+    prs.save(
+        output
+    )
+
+    return output.getvalue()
+
+
+# ============================================================
+# MAIN APPLICATION
+# ============================================================
 
 
 def main() -> None:
