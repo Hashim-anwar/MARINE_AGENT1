@@ -947,6 +947,169 @@ def make_context_query(
     )
 
 
+def make_troubleshooting_pdf(
+    case: dict[str, Any],
+    manual_answer: str | None,
+    sources: list[dict[str, Any]] | None = None,
+    web_answer: str | None = None,
+    web_sources: list[dict[str, Any]] | None = None,
+) -> bytes:
+    """Create a structured troubleshooting PDF with 14pt Times New Roman body text.
+
+    The troubleshooting workflow is deliberately kept separate from the existing
+    training-output architecture. This function only formats the already-approved
+    troubleshooting answer(s) for download and does not change the human-in-loop
+    web-search decision.
+    """
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
+
+    font_name = _register_reportlab_fonts()
+    output = io.BytesIO()
+    document = SimpleDocTemplate(
+        output,
+        pagesize=A4,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+        title=clean_output_text(
+            f"MarineWise AI - Troubleshooting - {case.get('defect', '')}"
+        ),
+        author="MarineWise AI",
+    )
+
+    title_style = ParagraphStyle(
+        "TroubleTitle", fontName=font_name, fontSize=20, leading=24,
+        alignment=TA_CENTER, textColor=colors.HexColor("#17324D"), spaceAfter=8,
+    )
+    meta_style = ParagraphStyle(
+        "TroubleMeta", fontName=font_name, fontSize=14, leading=20,
+        alignment=TA_CENTER, textColor=colors.HexColor("#344054"), spaceAfter=12,
+    )
+    body_style = ParagraphStyle(
+        "TroubleBody", fontName=font_name, fontSize=14, leading=20,
+        alignment=TA_JUSTIFY, textColor=colors.HexColor("#17202A"),
+        spaceAfter=8, allowWidows=0, allowOrphans=0,
+    )
+    step_style = ParagraphStyle(
+        "TroubleStep", fontName=font_name, fontSize=14, leading=20,
+        alignment=TA_JUSTIFY, textColor=colors.HexColor("#17202A"),
+        leftIndent=7 * mm, firstLineIndent=-7 * mm, spaceAfter=10,
+        allowWidows=0, allowOrphans=0,
+    )
+    heading_style = ParagraphStyle(
+        "TroubleHeading", fontName=font_name, fontSize=17, leading=21,
+        alignment=TA_LEFT, textColor=colors.HexColor("#17324D"),
+        spaceBefore=10, spaceAfter=7,
+    )
+    source_style = ParagraphStyle(
+        "TroubleSource", fontName=font_name, fontSize=11, leading=16,
+        alignment=TA_LEFT, textColor=colors.HexColor("#475467"), spaceAfter=5,
+    )
+
+    manufacturer = clean_output_text(case.get("manufacturer")) or "Not specified"
+    engine_model = clean_output_text(case.get("engine_model")) or "Not specified"
+    serial = clean_output_text(case.get("serial")) or "Not provided"
+    defect = clean_output_text(case.get("defect")) or "Not specified"
+
+    story = [
+        Paragraph("MarineWise AI - Step-by-Step Troubleshooting", title_style),
+        Paragraph(
+            safe_paragraph(
+                f"Manufacturer: {manufacturer} | Engine Model: {engine_model} | "
+                f"Serial: {serial}"
+            ),
+            meta_style,
+        ),
+        Paragraph("Reported Defect / Alarm", heading_style),
+        Paragraph(safe_paragraph(defect), body_style),
+    ]
+
+    if manual_answer and manual_answer.strip():
+        story.append(Paragraph("Manual-Grounded Troubleshooting Procedure", heading_style))
+        story.append(
+            Paragraph(
+                safe_paragraph(
+                    "The following procedure is grounded in the supplied manual excerpts. "
+                    "Follow the sequence, verify each expected result before proceeding, "
+                    "and use the current manufacturer procedure for any final adjustment or repair."
+                ),
+                body_style,
+            )
+        )
+        _append_troubleshooting_answer_flow(story, manual_answer, body_style, step_style, heading_style)
+
+    if web_answer and web_answer.strip():
+        story.append(PageBreak())
+        story.append(Paragraph("Web-Sourced Supplementary Troubleshooting", heading_style))
+        story.append(
+            Paragraph(
+                safe_paragraph(
+                    "This section was added only after the human-in-loop online-search approval. "
+                    "Verify all web-derived information against the current manufacturer manual "
+                    "before carrying out work on the equipment."
+                ),
+                body_style,
+            )
+        )
+        _append_troubleshooting_answer_flow(story, web_answer, body_style, step_style, heading_style)
+
+    source_lines = _source_lines(sources or [], web_sources or [])
+    if source_lines:
+        story.append(PageBreak())
+        story.append(Paragraph("Sources & References", heading_style))
+        story.append(
+            Paragraph(
+                safe_paragraph(
+                    "Manual sources are the primary evidence. Web sources are included only "
+                    "when online research was explicitly approved by the user."
+                ),
+                body_style,
+            )
+        )
+        for line in source_lines:
+            story.append(Paragraph(safe_paragraph(line), source_style))
+
+    document.build(story)
+    return output.getvalue()
+
+
+def _append_troubleshooting_answer_flow(
+    story: list,
+    answer: str,
+    body_style: Any,
+    step_style: Any,
+    heading_style: Any,
+) -> None:
+    """Render troubleshooting text as readable numbered steps without changing its content."""
+    text = clean_output_text(answer)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return
+
+    for line in lines:
+        normalized = re.sub(r"^[-*•]+\s*", "", line).strip()
+        normalized = re.sub(r"^#{1,6}\s*", "", normalized).strip()
+        numbered = re.match(r"^(\d+)[.)]\s+(.*)$", normalized)
+        heading = (
+            len(normalized) <= 90
+            and normalized.endswith(":")
+            and not numbered
+        )
+        if heading:
+            story.append(Paragraph(safe_paragraph(normalized.rstrip(":")), heading_style))
+        elif numbered:
+            story.append(Paragraph(safe_paragraph(f"{numbered.group(1)}. {numbered.group(2)}"), step_style))
+        else:
+            story.append(Paragraph(safe_paragraph(normalized), body_style))
+
+
+
 def troubleshooting_page() -> None:
     st.markdown(
         '<div class="main-title">Troubleshooting Agent</div>',
@@ -1064,6 +1227,19 @@ You are a marine engine troubleshooting specialist.
 
 Use ONLY the supplied manual excerpts.
 
+Your response must be a properly refined, technician-ready, STEP-BY-STEP troubleshooting procedure.
+Do not give a loose paragraph or generic explanation. Organize the response in this order:
+1. Problem / symptom interpretation
+2. Safety and isolation precautions that are explicitly supported by the manual
+3. Step-by-step checks in the correct diagnostic sequence
+4. Expected result for each check
+5. What to do if the expected result is NOT obtained
+6. Root-cause conclusion only when supported by the manual
+7. Corrective action only when supported by the manual
+8. Final verification / return-to-service checks when supported
+
+For every diagnostic step, make the action clear and practical. Keep the sequence logically aligned: start with safe, simple observations/checks before more involved checks, unless the manual specifies another order. Do not invent a sequence when the manual does not support it.
+
 Do not invent:
 - specifications
 - causes
@@ -1071,13 +1247,15 @@ Do not invent:
 - procedures
 - component locations
 - maintenance intervals
+- measurements or acceptance criteria
+
+If a required detail is missing from the excerpts, explicitly say that it is not stated in the supplied manual instead of guessing.
 
 If the excerpts do not actually answer the question, return exactly:
 
 Not found in manuals. Do you want me to search online?
 
-Cite the source file and exact page number
-for claims that are supported by the excerpts.
+Cite the source file and exact page number for claims that are supported by the excerpts.
 """,
                     (
                         f"Manufacturer: {manufacturer}\n"
@@ -1204,14 +1382,18 @@ for claims that are supported by the excerpts.
 You are a marine engine troubleshooting assistant.
 
 This answer is FROM THE WEB, not from the supplied manuals.
+Search reliable manufacturer documentation and reputable technical sources.
 
-Search reliable manufacturer documentation and reputable
-technical sources.
+Return a properly refined, technician-ready STEP-BY-STEP troubleshooting procedure. Organize it as:
+1. Problem / symptom interpretation
+2. Safety and isolation
+3. Diagnostic checks in sequence
+4. Expected result for each check
+5. Decision point if the result is abnormal
+6. Corrective action when supported by the source
+7. Final verification
 
-Do not invent specifications.
-
-Clearly say that the answer is from the web and instruct
-the technician to verify it against the current engine manual.
+Do not invent specifications, alarm limits, procedures, component locations, measurements, or maintenance intervals. Clearly identify information that is web-derived and instruct the technician to verify it against the current engine manual.
 """,
                     (
                         f"Find reliable information for "
@@ -1243,6 +1425,36 @@ the technician to verify it against the current engine manual.
         )
 
         st.write(web_answer)
+
+    # --------------------------------------------------------
+    # DOWNLOADABLE STEP-BY-STEP TROUBLESHOOTING PDF
+    # --------------------------------------------------------
+    final_manual_answer = st.session_state.get("troubleshooting_answer")
+    final_web_answer = st.session_state.get("troubleshooting_web_answer")
+    if final_manual_answer or final_web_answer:
+        try:
+            troubleshooting_pdf = make_troubleshooting_pdf(
+                case=case,
+                manual_answer=final_manual_answer,
+                sources=relevant,
+                web_answer=final_web_answer,
+                web_sources=st.session_state.get("troubleshooting_web_sources", []),
+            )
+            filename_model = re.sub(
+                r"[^A-Za-z0-9_-]+",
+                "_",
+                case.get("engine_model", "engine"),
+            ).strip("_") or "engine"
+            st.download_button(
+                "Download Step-by-Step Troubleshooting PDF",
+                data=troubleshooting_pdf,
+                file_name=f"MarineWise_Troubleshooting_{filename_model}.pdf",
+                mime="application/pdf",
+                type="primary",
+                key="download_troubleshooting_pdf",
+            )
+        except Exception as exc:
+            st.error(f"Could not create the troubleshooting PDF: {exc}")
 
 
 # ============================================================
