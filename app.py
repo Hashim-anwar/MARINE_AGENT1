@@ -6439,24 +6439,40 @@ def make_remedial_ppt(
 # ============================================================
 
 
+# ============================================================
+# MAIN APPLICATION
+# ============================================================
+
 def main() -> None:
+
     sidebar_manuals()
 
     page = st.sidebar.radio(
-    "Navigate",
-    [
-        "Troubleshooting Agent",
-        "Training Agent",
-        "Marine AI Command Center",
-        "Learning",
-    ],
-)
+        "Navigate",
+        [
+            "Troubleshooting Agent",
+            "Training Agent",
+            "Marine AI Command Center",
+            "Learning",
+        ],
+    )
 
     try:
+
+        # ----------------------------------------------------
+        # PAGE 1 — TROUBLESHOOTING AGENT
+        # ----------------------------------------------------
+
         if page == "Troubleshooting Agent":
+
             troubleshooting_page()
 
+        # ----------------------------------------------------
+        # PAGE 2 — TRAINING AGENT
+        # ----------------------------------------------------
+
         elif page == "Training Agent":
+
             st.markdown(
                 '<div class="main-title">'
                 "Technical Training Agent"
@@ -6498,13 +6514,24 @@ def main() -> None:
             with tabs[2]:
                 assessment_page()
 
-                elif page == "Marine AI Command Center":
+        # ----------------------------------------------------
+        # PAGE 3 — MARINE AI COMMAND CENTER
+        # ----------------------------------------------------
+
+        elif page == "Marine AI Command Center":
+
             marine_ai_command_center_page()
 
-        else:
+        # ----------------------------------------------------
+        # PAGE 4 — LEARNING
+        # ----------------------------------------------------
+
+        elif page == "Learning":
+
             learning_page()
 
     except Exception as exc:
+
         import traceback
 
         message = str(exc)
@@ -6513,7 +6540,10 @@ def main() -> None:
             f"MarineWise AI encountered an error: {exc}"
         )
 
-        with st.expander("Show technical error details"):
+        with st.expander(
+            "Show technical error details"
+        ):
+
             st.code(
                 traceback.format_exc(),
                 language="text",
@@ -6523,6 +6553,7 @@ def main() -> None:
             "context_length_exceeded" in message
             or "reduce the length" in message.lower()
         ):
+
             st.error(
                 f"The request was too large for the "
                 f"current {selected_provider()} request limits."
@@ -6533,7 +6564,9 @@ def main() -> None:
                 "small context budget. Training uses a "
                 "separate larger context budget."
             )
+
         else:
+
             st.caption(
                 "Also check that the selected provider API key, "
                 "TAVILY_API_KEY, and uploaded manual are configured "
