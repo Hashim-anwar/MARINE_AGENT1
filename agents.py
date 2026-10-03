@@ -19,12 +19,14 @@ import requests
 # The Command Center raises a clear installation error if CrewAI is unavailable.
 try:
     from crewai import Agent, Crew, Process, Task, LLM
+    from crewai.llms.base_llm import BaseLLM
     from crewai.tools import BaseTool
     CREWAI_AVAILABLE = True
     CREWAI_IMPORT_ERROR = ""
 except Exception as _crewai_exc:
     Agent = Crew = Process = Task = LLM = None
     BaseTool = None
+    BaseLLM = None
     CREWAI_AVAILABLE = False
     CREWAI_IMPORT_ERROR = str(_crewai_exc)
 
@@ -1338,6 +1340,103 @@ if CREWAI_AVAILABLE:
                 return f"Tavily search failed: {exc}"
 
 
+_CrewAIBaseLLM = BaseLLM if CREWAI_AVAILABLE else object
+
+
+class MarineGroqCrewLLM(_CrewAIBaseLLM):
+    """CrewAI adapter that calls Groq directly without CrewAI model rewriting.
+
+    This is intentionally used only by the CrewAI Command Center. The rest of
+    MarineWise continues using the existing direct Groq/Gemini functions.
+    """
+
+    llm_type: str = "marinewise_groq"
+
+    def __init__(self, model: str, api_key: str, temperature: float = 0.2):
+        super().__init__(model=model, temperature=temperature)
+        self.api_key = api_key
+        self.endpoint = "https://api.groq.com/openai/v1/chat/completions"
+
+    def call(
+        self,
+        messages,
+        tools=None,
+        callbacks=None,
+        available_functions=None,
+        from_task=None,
+        from_agent=None,
+        response_model=None,
+        **kwargs,
+    ):
+        if isinstance(messages, str):
+            messages = [{"role": "user", "content": messages}]
+
+        # CrewAI may pass internal metadata/parameters that Groq does not need.
+        # Only forward parameters supported by the Groq Chat Completions API.
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature if self.temperature is not None else 0.2,
+            "reasoning_effort": "low",
+        }
+
+        max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
+        if max_tokens:
+            payload["max_completion_tokens"] = int(max_tokens)
+
+        if self.stop:
+            payload["stop"] = self.stop
+
+        # The Command Center already supplies approved web evidence to the
+        # research agent. We deliberately do not enable function calling here;
+        # this avoids another provider-routing layer while keeping Tavily as a
+        # separately available CrewAI tool for future extension.
+        # Other CrewAI agents do not require tools for their core workflow.
+
+        response = requests.post(
+            self.endpoint,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=180,
+        )
+
+        if not response.ok:
+            try:
+                detail = response.json()
+            except Exception:
+                detail = response.text
+            raise RuntimeError(
+                f"Groq CrewAI request failed with HTTP {response.status_code}: {detail}"
+            )
+
+        data = response.json()
+        choices = data.get("choices") or []
+        if not choices:
+            raise RuntimeError(f"Groq returned no choices: {data}")
+
+        message = choices[0].get("message") or {}
+        content = message.get("content")
+
+        if content is None:
+            # Some model/API responses can expose content in a different form.
+            # Return a useful error rather than letting CrewAI fail obscurely.
+            raise RuntimeError(f"Groq returned no message content: {data}")
+
+        return str(content)
+
+    def supports_function_calling(self) -> bool:
+        return False
+
+    def supports_stop_words(self) -> bool:
+        return True
+
+    def get_context_window_size(self) -> int:
+        return 131072
+
+
 def _crewai_llm(provider: str, api_key: str):
     """Create the CrewAI LLM used by every MarineWise Command Center agent."""
     if not CREWAI_AVAILABLE:
@@ -1349,27 +1448,19 @@ def _crewai_llm(provider: str, api_key: str):
     provider_clean = _clean_text(provider).lower()
     key = _get_key(provider_clean, api_key)
 
-    # CrewAI uses provider-prefixed model identifiers for its LLM abstraction.
-    # This keeps the selected provider explicit; it does NOT silently switch
-    # Gemini to Groq or vice versa.
     if provider_clean == "groq":
-        # IMPORTANT: Do not use ``groq/...`` here.  In a CrewAI
-        # installation without LiteLLM, Groq is accessed through
-        # CrewAI's native OpenAI-compatible provider.  Groq exposes an
-        # OpenAI-compatible API endpoint, so the existing Groq API key
-        # remains the credential and no OpenAI key is required.
-        return LLM(
-            # CrewAI native OpenAI-compatible mode.  Groq requires the
-            # full model ID `openai/gpt-oss-120b`; custom_openai=True
-            # prevents CrewAI from stripping that provider/model prefix.
+        # IMPORTANT:
+        # Do NOT pass Groq GPT-OSS through CrewAI's OpenAI provider here.
+        # CrewAI can normalize `openai/gpt-oss-120b` to `gpt-oss-120b`,
+        # which Groq correctly rejects. This custom adapter sends the exact
+        # Groq model ID directly to Groq's OpenAI-compatible endpoint.
+        return MarineGroqCrewLLM(
             model=GROQ_MODEL,
-            custom_openai=True,
             api_key=key,
-            base_url="https://api.groq.com/openai/v1",
+            temperature=0.2,
         )
 
     if provider_clean == "gemini":
-        # Gemini uses CrewAI's native Google/Gemini provider.
         return LLM(
             model=f"gemini/{GEMINI_MODEL}",
             api_key=key,
