@@ -25,6 +25,8 @@ import re
 import textwrap
 from typing import Any
 
+import numpy as np
+
 import requests
 import streamlit as st
 from PIL import Image, ImageOps
@@ -3409,6 +3411,667 @@ def configure_tesseract() -> str | None:
     return executable
 
 
+
+def _assessment_ocr_lines(image: Image.Image) -> list[dict[str, Any]]:
+    """Return Tesseract OCR lines with positions for answer-mark detection."""
+    import pytesseract
+
+    work = image.convert("RGB")
+    scale = min(1.0, 1000 / max(work.size))
+
+    if scale < 1.0:
+        work = work.resize(
+            (
+                int(work.width * scale),
+                int(work.height * scale),
+            ),
+            Image.Resampling.LANCZOS,
+        )
+
+    data = pytesseract.image_to_data(
+        work,
+        config="--psm 6",
+        output_type=pytesseract.Output.DICT,
+    )
+
+    grouped: dict[tuple[int, int, int], list[dict[str, Any]]] = {}
+
+    for index, raw_text in enumerate(data["text"]):
+        text_value = raw_text.strip()
+
+        if not text_value:
+            continue
+
+        key = (
+            int(data["block_num"][index]),
+            int(data["par_num"][index]),
+            int(data["line_num"][index]),
+        )
+
+        grouped.setdefault(key, []).append(
+            {
+                "x": int(data["left"][index]),
+                "y": int(data["top"][index]),
+                "w": int(data["width"][index]),
+                "h": int(data["height"][index]),
+                "text": text_value,
+            }
+        )
+
+    lines: list[dict[str, Any]] = []
+
+    for words in grouped.values():
+        words.sort(key=lambda item: item["x"])
+
+        top = min(
+            item["y"]
+            for item in words
+        )
+
+        bottom = max(
+            item["y"] + item["h"]
+            for item in words
+        )
+
+        left = min(
+            item["x"]
+            for item in words
+        )
+
+        lines.append(
+            {
+                "y": top,
+                "bottom": bottom,
+                "x": left,
+                "text": " ".join(
+                    item["text"]
+                    for item in words
+                ),
+            }
+        )
+
+    lines.sort(
+        key=lambda item: item["y"]
+    )
+
+    return lines
+
+
+def _assessment_colored_mark_groups(
+    image: Image.Image,
+) -> list[tuple[int, int]]:
+    """
+    Detect colored pen/highlighter marks near the answer-option column.
+
+    The supplied assessments use purple/blue filled circles. This detector
+    deliberately looks for saturated colored ink rather than ordinary
+    black printed text.
+    """
+    work = image.convert("RGB")
+
+    scale = min(
+        1.0,
+        1000 / max(work.size),
+    )
+
+    if scale < 1.0:
+        work = work.resize(
+            (
+                int(work.width * scale),
+                int(work.height * scale),
+            ),
+            Image.Resampling.LANCZOS,
+        )
+
+    pixels = np.asarray(
+        work,
+        dtype=np.uint8,
+    )
+
+    maximum = pixels.max(
+        axis=2
+    )
+    minimum = pixels.min(
+        axis=2
+    )
+
+    saturation = (
+        maximum.astype(np.int16)
+        - minimum.astype(np.int16)
+    )
+
+    red = pixels[:, :, 0].astype(
+        np.int16
+    )
+    green = pixels[:, :, 1].astype(
+        np.int16
+    )
+    blue = pixels[:, :, 2].astype(
+        np.int16
+    )
+
+    # Purple/blue/colored writing:
+    # - noticeably saturated
+    # - darker than the white paper
+    # - blue channel stronger than red
+    mask = (
+        (saturation > 45)
+        & (maximum < 235)
+        & ((blue - red) > 20)
+    )
+
+    x_start = int(
+        work.width * 0.08
+    )
+    x_end = int(
+        work.width * 0.28
+    )
+
+    row_counts = mask[
+        :,
+        x_start:x_end,
+    ].sum(
+        axis=1
+    )
+
+    active = row_counts >= 3
+
+    groups: list[tuple[int, int]] = []
+
+    index = 0
+
+    while index < len(active):
+        if not active[index]:
+            index += 1
+            continue
+
+        end_index = index
+
+        while (
+            end_index + 1 < len(active)
+            and (
+                active[end_index + 1]
+                or row_counts[end_index + 1] >= 1
+            )
+        ):
+            end_index += 1
+
+        total_pixels = int(
+            row_counts[
+                index:end_index + 1
+            ].sum()
+        )
+
+        height = (
+            end_index - index + 1
+        )
+
+        if (
+            5 <= height <= 60
+            and total_pixels >= 25
+        ):
+            groups.append(
+                (
+                    index,
+                    end_index,
+                )
+            )
+
+        index = end_index + 1
+
+    return groups
+
+
+def _infer_marked_option(
+    mark_top: int,
+    mark_bottom: int,
+    lines: list[dict[str, Any]],
+) -> str | None:
+    """
+    Infer A/B/C/D for one detected colored mark.
+
+    The selected option's OCR line often contains '@' or another symbol
+    instead of the printed option letter. We therefore treat the line
+    containing the mark as an unlabeled option and infer its letter from
+    the neighboring printed A/B/C/D lines.
+    """
+    window_top = mark_top - 50
+    window_bottom = mark_bottom + 70
+
+    nearby = [
+        line
+        for line in lines
+        if line["bottom"] >= window_top
+        and line["y"] <= window_bottom
+    ]
+
+    selected_line = None
+    selected_distance = None
+
+    for line in nearby:
+        overlaps = (
+            line["y"] <= mark_bottom
+            and line["bottom"] >= mark_top
+        )
+
+        if overlaps:
+            distance = abs(
+                line["y"] - mark_top
+            )
+
+            if (
+                selected_distance is None
+                or distance < selected_distance
+            ):
+                selected_line = line
+                selected_distance = distance
+
+    if selected_line is not None:
+        selected_match = re.search(
+            r"(?<![A-Za-z])([ABCD])[\.:,\)]",
+            selected_line["text"],
+            re.I,
+        )
+
+        if selected_match:
+            return selected_match.group(1).upper()
+
+    labels: list[tuple[int, int, str]] = []
+
+    for line in nearby:
+        if (
+            selected_line is not None
+            and line is selected_line
+        ):
+            continue
+
+        for match in re.finditer(
+            r"(?<![A-Za-z])([ABCD])[\.:,\)]",
+            line["text"],
+            re.I,
+        ):
+            labels.append(
+                (
+                    line["y"],
+                    line["bottom"],
+                    match.group(1).upper(),
+                )
+            )
+
+    # Keep the closest occurrence for each printed option label.
+    label_positions: dict[str, int] = {}
+
+    for top, bottom, label in labels:
+        if label not in label_positions:
+            label_positions[label] = top
+        elif abs(top - mark_top) < abs(
+            label_positions[label] - mark_top
+        ):
+            label_positions[label] = top
+
+    option_index = {
+        "A": 0,
+        "B": 1,
+        "C": 2,
+        "D": 3,
+    }
+
+    known = sorted(
+        (
+            option_index[label],
+            position,
+            label,
+        )
+        for label, position
+        in label_positions.items()
+    )
+
+    if not known:
+        return None
+
+    # If the selected line sits between two known labels and exactly one
+    # option is missing, the missing middle option is the selected answer.
+    for left, right in zip(
+        known,
+        known[1:],
+    ):
+        left_index, left_y, _ = left
+        right_index, right_y, _ = right
+
+        if (
+            left_y <= mark_top <= right_y
+            and right_index - left_index == 2
+        ):
+            return chr(
+                ord("A")
+                + left_index
+                + 1
+            )
+
+    # Use the known labels as a vertical scale. This handles cases where
+    # OCR misses A or B entirely.
+    if len(known) >= 2:
+        x_values = np.asarray(
+            [
+                item[0]
+                for item in known
+            ],
+            dtype=float,
+        )
+
+        y_values = np.asarray(
+            [
+                item[1]
+                for item in known
+            ],
+            dtype=float,
+        )
+
+        slope, intercept = np.polyfit(
+            x_values,
+            y_values,
+            1,
+        )
+
+        predictions = {
+            chr(ord("A") + index): (
+                slope * index
+                + intercept
+            )
+            for index in range(4)
+        }
+
+        return min(
+            predictions,
+            key=lambda label: abs(
+                predictions[label]
+                - mark_top
+            ),
+        )
+
+    # Last-resort one-label estimate. Estimate the printed option
+    # spacing from nearby OCR lines instead of assuming a fixed value.
+    index, known_y, _ = known[0]
+
+    nearby_tops = sorted(
+        {
+            line["y"]
+            for line in nearby
+            if line["y"] <= window_bottom
+            and line["bottom"] >= window_top
+        }
+    )
+
+    gaps = [
+        right - left
+        for left, right in zip(
+            nearby_tops,
+            nearby_tops[1:],
+        )
+        if 10 <= right - left <= 35
+    ]
+
+    spacing = (
+        float(np.median(gaps))
+        if gaps
+        else 20.0
+    )
+
+    predictions = {
+        chr(ord("A") + option): (
+            known_y
+            + (option - index) * spacing
+        )
+        for option in range(4)
+    }
+
+    return min(
+        predictions,
+        key=lambda label: abs(
+            predictions[label]
+            - mark_top
+        ),
+    )
+
+
+def _assign_marked_question_numbers(
+    mark_groups: list[tuple[int, int]],
+    lines: list[dict[str, Any]],
+) -> list[tuple[int, int, int]]:
+    """
+    Associate colored marks with question numbers.
+
+    OCR occasionally misses a question number, so the detected marks are
+    also used to fill missing sequential question numbers.
+    """
+    question_starts: list[tuple[int, int]] = []
+
+    for line in lines:
+        match = re.search(
+            r"(?<!\d)(\d{1,2})\.",
+            line["text"],
+        )
+
+        if match:
+            question_starts.append(
+                (
+                    int(match.group(1)),
+                    line["y"],
+                )
+            )
+
+    question_starts.sort(
+        key=lambda item: item[1]
+    )
+
+    assigned: list[tuple[int, int, int]] = []
+
+    marks = sorted(
+        mark_groups,
+        key=lambda item: item[0],
+    )
+
+    for mark_index, (
+        mark_top,
+        mark_bottom,
+    ) in enumerate(marks):
+        prior_questions = [
+            item
+            for item in question_starts
+            if item[1] <= mark_top
+        ]
+
+        if prior_questions:
+            base_question, base_y = (
+                prior_questions[-1]
+            )
+
+            next_question_y = next(
+                (
+                    y
+                    for q, y
+                    in question_starts
+                    if y > base_y
+                ),
+                None,
+            )
+
+            earlier_marks = [
+                item
+                for item in marks[:mark_index]
+                if item[0] >= base_y
+                and (
+                    next_question_y is None
+                    or item[0] < next_question_y
+                )
+            ]
+
+            question_number = (
+                base_question
+                + len(earlier_marks)
+            )
+
+        elif question_starts:
+            first_question = min(
+                question_starts,
+                key=lambda item: item[1],
+            )[0]
+
+            earlier_before_first = [
+                item
+                for item in marks[:mark_index]
+                if item[0] < question_starts[0][1]
+            ]
+
+            question_number = (
+                first_question
+                - len(earlier_before_first)
+                + len(earlier_before_first)
+                - 1
+                + 1
+            )
+
+            # Equivalent to first_question minus the number of marks
+            # still to be assigned before the first explicit question.
+            total_before_first = sum(
+                1
+                for item in marks
+                if item[0] < question_starts[0][1]
+            )
+
+            position_before_first = len(
+                earlier_before_first
+            )
+
+            question_number = (
+                first_question
+                - total_before_first
+                + position_before_first
+            )
+
+        else:
+            question_number = (
+                mark_index + 1
+            )
+
+        assigned.append(
+            (
+                question_number,
+                mark_top,
+                mark_bottom,
+            )
+        )
+
+    return assigned
+
+
+def detect_marked_assessment_answers(
+    uploaded_files: list[Any],
+) -> dict[int, str]:
+    """
+    Read colored technician answer marks from all assessment pages.
+
+    The detector works from the original page images rather than relying
+    on Tesseract to understand a filled circle.
+    """
+    detected: dict[int, str] = {}
+
+    for uploaded_file in uploaded_files:
+        image = Image.open(
+            io.BytesIO(
+                uploaded_file.getvalue()
+            )
+        )
+
+        image = ImageOps.exif_transpose(
+            image
+        ).convert("RGB")
+
+        lines = _assessment_ocr_lines(
+            image
+        )
+
+        mark_groups = (
+            _assessment_colored_mark_groups(
+                image
+            )
+        )
+
+        question_marks = (
+            _assign_marked_question_numbers(
+                mark_groups,
+                lines,
+            )
+        )
+
+        for (
+            question_number,
+            mark_top,
+            mark_bottom,
+        ) in question_marks:
+            option = _infer_marked_option(
+                mark_top,
+                mark_bottom,
+                lines,
+            )
+
+            if option in {
+                "A",
+                "B",
+                "C",
+                "D",
+            }:
+                detected[
+                    question_number
+                ] = option
+
+    return dict(
+        sorted(
+            detected.items()
+        )
+    )
+
+
+def format_detected_answers(
+    answers: dict[int, str],
+) -> str:
+    """Format detected answers for display and model context."""
+    if not answers:
+        return "No marked answers were detected."
+
+    return ", ".join(
+        f"{question}={answer}"
+        for question, answer
+        in sorted(
+            answers.items()
+        )
+    )
+
+
+def parse_answer_key(
+    answer_key: str,
+) -> dict[int, str]:
+    """Parse entries such as 1=B, 2=C, 3=True into MCQ answers."""
+    parsed: dict[int, str] = {}
+
+    for match in re.finditer(
+        r"(?<!\d)(\d{1,3})\s*"
+        r"(?:=|:|-)\s*"
+        r"([ABCD])\b",
+        answer_key,
+        re.I,
+    ):
+        parsed[
+            int(match.group(1))
+        ] = match.group(2).upper()
+
+    return dict(
+        sorted(
+            parsed.items()
+        )
+    )
+
+
 def extract_assessment_images(
     uploaded_files: list[Any],
 ) -> str:
@@ -3463,6 +4126,7 @@ def extract_assessment_images(
     )
 
 
+
 def assessment_page() -> None:
     st.subheader(
         "2C. Score an Assessment"
@@ -3470,12 +4134,15 @@ def assessment_page() -> None:
 
     st.caption(
         "Upload 1–7 assessment pages/images together. "
-        "The pages are processed in upload order."
+        "The pages are processed and scored as one assessment."
     )
 
     engine = st.text_input(
         "Engine / Manufacturer (optional)",
-        placeholder="Example: MTU 16V 4000 M90 / Caterpillar C32",
+        placeholder=(
+            "Example: MTU 16V 4000 M90 / "
+            "Caterpillar C32"
+        ),
         key="assessment_engine",
     )
 
@@ -3488,13 +4155,17 @@ def assessment_page() -> None:
         ],
         accept_multiple_files=True,
         key="assessment_images",
-        help="Select up to 7 assessment images/pages at once.",
+        help=(
+            "Select between 1 and 7 assessment "
+            "pages/images."
+        ),
     )
 
     answer_key = st.text_area(
         "Answer key",
         placeholder=(
-            "Example: 1=A, 2=C, 3=True, 4=B"
+            "Example: 1=B, 2=B, 3=B, 4=B, "
+            "5=A, 6=B, 7=D, 8=B, 9=C, 10=D"
         ),
         key="assessment_answer_key",
     )
@@ -3505,36 +4176,93 @@ def assessment_page() -> None:
         )
         return
 
-    if uploaded:
-        st.markdown("### Assessment Pages")
-
-        preview_columns = st.columns(
-            min(len(uploaded), 4)
-        )
-
-        for index, uploaded_file in enumerate(
-            uploaded,
-            start=1,
-        ):
-            with preview_columns[(index - 1) % len(preview_columns)]:
-                image = Image.open(
-                    io.BytesIO(uploaded_file.getvalue())
-                )
-                image = ImageOps.exif_transpose(
-                    image
-                )
-
-                st.image(
-                    image,
-                    caption=(
-                        f"Page {index}: "
-                        f"{uploaded_file.name}"
-                    ),
-                    use_container_width=True,
-                )
-
     if not uploaded:
         return
+
+    st.markdown(
+        "### Assessment Pages"
+    )
+
+    preview_columns = st.columns(
+        min(
+            len(uploaded),
+            4,
+        )
+    )
+
+    for index, uploaded_file in enumerate(
+        uploaded,
+        start=1,
+    ):
+        with preview_columns[
+            (index - 1)
+            % len(preview_columns)
+        ]:
+            image = Image.open(
+                io.BytesIO(
+                    uploaded_file.getvalue()
+                )
+            )
+
+            image = ImageOps.exif_transpose(
+                image
+            )
+
+            st.image(
+                image,
+                caption=(
+                    f"Page {index}: "
+                    f"{uploaded_file.name}"
+                ),
+                use_container_width=True,
+            )
+
+    executable = configure_tesseract()
+
+    if not executable:
+        st.error(
+            "Tesseract OCR could not be found. "
+            "Install Tesseract OCR on your computer, or add "
+            "tesseract-ocr to packages.txt for Streamlit Cloud."
+        )
+        return
+
+    # Detect the actual colored answer marks before the scoring button.
+    # This prevents Tesseract from interpreting a filled circle as text.
+    with st.spinner(
+        "Detecting technician answer marks..."
+    ):
+        try:
+            detected_answers = (
+                detect_marked_assessment_answers(
+                    uploaded
+                )
+            )
+        except Exception as exc:
+            detected_answers = {}
+            st.warning(
+                "Automatic answer-mark detection could not "
+                f"complete: {exc}"
+            )
+
+    st.text_input(
+        "Detected technician answers",
+        value=format_detected_answers(
+            detected_answers
+        ),
+        disabled=True,
+        help=(
+            "The app detects the colored marks next to "
+            "the A/B/C/D choices. Review the result before "
+            "scoring."
+        ),
+    )
+
+    if not detected_answers:
+        st.warning(
+            "No colored answer marks were detected. "
+            "Use clearly visible filled/circled answer marks."
+        )
 
     if st.button(
         "Score Assessment",
@@ -3543,17 +4271,8 @@ def assessment_page() -> None:
     ):
         if not answer_key.strip():
             st.warning(
-                "Add an answer key so the app can calculate the assessment score."
-            )
-            return
-
-        executable = configure_tesseract()
-
-        if not executable:
-            st.error(
-                "Tesseract OCR could not be found. "
-                "Install Tesseract OCR on your computer, or add "
-                "tesseract-ocr to packages.txt for Streamlit Cloud."
+                "Add an answer key so the app can calculate "
+                "the assessment score."
             )
             return
 
@@ -3583,13 +4302,16 @@ def assessment_page() -> None:
             score = score_with_agent(
                 extracted,
                 answer_key,
+                detected_answers,
             )
 
         st.markdown(
             "### Assessment Result"
         )
 
-        score_col, topic_col = st.columns([1, 2])
+        score_col, topic_col = st.columns(
+            [1, 2]
+        )
 
         with score_col:
             st.metric(
@@ -3598,14 +4320,30 @@ def assessment_page() -> None:
             )
 
         with topic_col:
-            if score.get("missed_topics"):
+            if score.get(
+                "missed_topics"
+            ):
                 st.markdown(
                     "**Improvement areas identified:** "
-                    + ", ".join(score["missed_topics"])
+                    + ", ".join(
+                        score["missed_topics"]
+                    )
                 )
 
         st.write(
             score["feedback"]
+        )
+
+        st.markdown(
+            "**Answer comparison:**"
+        )
+
+        st.code(
+            score.get(
+                "answer_comparison",
+                "No comparison available.",
+            ),
+            language="text",
         )
 
         if score["score"] >= 50:
@@ -3613,11 +4351,11 @@ def assessment_page() -> None:
                 "Assessment is at or above 50%. "
                 "No remedial package was automatically generated."
             )
-            render_sources([])
             return
 
         st.warning(
-            "Below 50% — a targeted technician retraining package is recommended."
+            "Below 50% — a targeted technician retraining "
+            "package is recommended."
         )
 
         missed_topics = score.get(
@@ -3627,7 +4365,8 @@ def assessment_page() -> None:
 
         if not missed_topics:
             missed_topics = [
-                "Topics associated with incorrect or unanswered assessment questions"
+                "Topics associated with incorrect "
+                "or unanswered assessment questions"
             ]
 
         remedial_topic = ", ".join(
@@ -3647,12 +4386,14 @@ def assessment_page() -> None:
 
         if rag:
             with st.spinner(
-                "Finding manual sections specifically related to the technician's missed topics..."
+                "Finding manual sections specifically related "
+                "to the technician's missed topics..."
             ):
                 rag_query = (
                     f"{engine.strip()}\n"
                     f"{remedial_topic}\n"
-                    "technician assessment mistakes troubleshooting training"
+                    "technician assessment mistakes "
+                    "troubleshooting training"
                 )
 
                 results = search_index(
@@ -3669,7 +4410,9 @@ def assessment_page() -> None:
                     max_chars=8000,
                 )
 
-                st.session_state.last_retrieved = relevant
+                st.session_state.last_retrieved = (
+                    relevant
+                )
 
         # ----------------------------------------------------
         # TARGETED WEB RESEARCH
@@ -3689,11 +4432,13 @@ def assessment_page() -> None:
             and run_training_web_research is not None
         ):
             with st.spinner(
-                "Researching the missed technical areas using reliable technical sources..."
+                "Researching the missed technical areas "
+                "using reliable technical sources..."
             ):
                 research = run_training_web_research(
                     selected_provider(),
-                    engine.strip() or "Marine engine",
+                    engine.strip()
+                    or "Marine engine",
                     remedial_topic,
                     "",
                     context,
@@ -3710,7 +4455,8 @@ def assessment_page() -> None:
         # ----------------------------------------------------
 
         with st.spinner(
-            "Building a targeted retraining package from the technician's actual mistakes..."
+            "Building a targeted retraining package "
+            "from the technician's actual mistakes..."
         ):
             remedial_content = run_agent(
                 """
@@ -3719,8 +4465,8 @@ REMEDIAL TRAINING PACKAGE for a technician who scored below 50%.
 
 The technician's MISSED TOPICS are the primary constraint.
 
-Your job is NOT to create generic marine training. Teach only the
-technical areas that the assessment shows the technician needs to improve.
+Do NOT create generic marine training. Teach only the technical areas
+that the assessment shows the technician needs to improve.
 
 SOURCE PRIORITY:
 1. Supplied manufacturer/manual excerpts are the primary source.
@@ -3754,6 +4500,8 @@ information when they differ or when the manual does not cover a point.
                     f"{remedial_topic}\n\n"
                     f"SCORING FEEDBACK:\n"
                     f"{score['feedback']}\n\n"
+                    f"ANSWER COMPARISON:\n"
+                    f"{score.get('answer_comparison', '')}\n\n"
                     f"OCR FROM ALL ASSESSMENT PAGES:\n"
                     f"{extracted}\n\n"
                     f"ANSWER KEY:\n"
@@ -3774,12 +4522,9 @@ information when they differ or when the manual does not cover a point.
             remedial_content
         )
 
-        # ----------------------------------------------------
-        # TARGETED DIAGRAM
-        # ----------------------------------------------------
-
         diagram = make_training_diagram(
-            engine.strip() or "Marine engine",
+            engine.strip()
+            or "Marine engine",
             remedial_topic,
         )
 
@@ -3790,29 +4535,30 @@ information when they differ or when the manual does not cover a point.
         st.image(
             diagram,
             caption=(
-                "Training diagram for the identified improvement areas. "
-                "Verify engine-specific architecture against the current manual."
+                "Training diagram for the identified "
+                "improvement areas. Verify engine-specific "
+                "architecture against the current manual."
             ),
             use_container_width=True,
         )
-
-        # ----------------------------------------------------
-        # TARGETED PROFESSIONAL PPT
-        # ----------------------------------------------------
 
         remedial_plan: list[dict[str, Any]] = []
 
         if generate_training_presentation_plan is not None:
             with st.spinner(
-                "Creating the targeted professional PowerPoint plan..."
+                "Creating the targeted professional "
+                "PowerPoint plan..."
             ):
-                plan_raw = generate_training_presentation_plan(
-                    selected_provider(),
-                    engine.strip() or "Marine engine",
-                    "",
-                    remedial_topic,
-                    context,
-                    research,
+                plan_raw = (
+                    generate_training_presentation_plan(
+                        selected_provider(),
+                        engine.strip()
+                        or "Marine engine",
+                        "",
+                        remedial_topic,
+                        context,
+                        research,
+                    )
                 )
 
                 remedial_plan = parse_training_plan(
@@ -3823,16 +4569,28 @@ information when they differ or when the manual does not cover a point.
             remedial_plan = [
                 {
                     "title": "Assessment Findings",
-                    "purpose": "Identify improvement areas",
+                    "purpose": (
+                        "Identify improvement areas"
+                    ),
                     "bullets": [
-                        f"Technician score: {score['score']:.0f}%",
-                        f"Missed areas: {remedial_topic}",
+                        (
+                            f"Technician score: "
+                            f"{score['score']:.0f}%"
+                        ),
+                        (
+                            f"Missed areas: "
+                            f"{remedial_topic}"
+                        ),
                     ],
                     "visual_type": "none",
                 },
                 {
-                    "title": "Targeted Technical Retraining",
-                    "purpose": "Correct knowledge gaps",
+                    "title": (
+                        "Targeted Technical Retraining"
+                    ),
+                    "purpose": (
+                        "Correct knowledge gaps"
+                    ),
                     "bullets": split_text(
                         remedial_content,
                         180,
@@ -3840,34 +4598,47 @@ information when they differ or when the manual does not cover a point.
                     "visual_type": "none",
                 },
                 {
-                    "title": "Practice & Final Retest",
-                    "purpose": "Confirm improvement",
+                    "title": (
+                        "Practice & Final Retest"
+                    ),
+                    "purpose": (
+                        "Confirm improvement"
+                    ),
                     "bullets": [
-                        "Review each missed topic.",
-                        "Explain the correct diagnostic reasoning.",
-                        "Complete the final retest.",
+                        (
+                            "Review each missed topic."
+                        ),
+                        (
+                            "Explain the correct "
+                            "diagnostic reasoning."
+                        ),
+                        (
+                            "Complete the final retest."
+                        ),
                     ],
                     "visual_type": "process",
                 },
             ]
 
-        ppt_bytes = make_professional_training_ppt(
-            engine.strip() or "Marine engine",
-            "",
-            f"Remedial Training — {remedial_topic}",
-            remedial_plan,
-            get_manual_page_images(
-                rag,
+        ppt_bytes = (
+            make_professional_training_ppt(
+                engine.strip()
+                or "Marine engine",
+                "",
+                (
+                    "Remedial Training — "
+                    f"{remedial_topic}"
+                ),
+                remedial_plan,
+                get_manual_page_images(
+                    rag,
+                    relevant,
+                ),
+                [],
                 relevant,
-            ),
-            [],
-            relevant,
-            web_sources,
+                web_sources,
+            )
         )
-
-        # ----------------------------------------------------
-        # DOWNLOADS: PDF / WORD / PPT
-        # ----------------------------------------------------
 
         st.markdown(
             "### Download Targeted Retraining Package"
@@ -3878,9 +4649,13 @@ information when they differ or when the manual does not cover a point.
         download_columns[0].download_button(
             "⬇ Download Remedial PDF",
             make_training_pdf(
-                engine.strip() or "Marine engine",
+                engine.strip()
+                or "Marine engine",
                 "",
-                f"Remedial Training — {remedial_topic}",
+                (
+                    "Remedial Training — "
+                    f"{remedial_topic}"
+                ),
                 remedial_content,
                 relevant,
                 diagram,
@@ -3893,9 +4668,13 @@ information when they differ or when the manual does not cover a point.
         download_columns[1].download_button(
             "⬇ Download Remedial Word",
             make_training_docx(
-                engine.strip() or "Marine engine",
+                engine.strip()
+                or "Marine engine",
                 "",
-                f"Remedial Training — {remedial_topic}",
+                (
+                    "Remedial Training — "
+                    f"{remedial_topic}"
+                ),
                 remedial_content,
                 diagram,
             ),
@@ -3931,6 +4710,7 @@ information when they differ or when the manual does not cover a point.
                 title = safe_text(
                     source.get("title")
                 )
+
                 url = safe_text(
                     source.get("url")
                 )
@@ -3949,31 +4729,181 @@ information when they differ or when the manual does not cover a point.
 def score_with_agent(
     extracted: str,
     answer_key: str,
+    detected_answers: dict[int, str] | None = None,
 ) -> dict[str, Any]:
+    """
+    Score from the detected technician marks and supplied answer key.
+
+    The numeric score is deliberately calculated in Python rather than
+    asking the language model to invent/parse the final percentage.
+    This prevents an OCR/model formatting failure from becoming 0%.
+    """
+    expected = parse_answer_key(
+        answer_key
+    )
+
+    if detected_answers:
+        comparisons: list[str] = []
+        correct_count = 0
+
+        for question_number, correct_answer in (
+            expected.items()
+        ):
+            technician_answer = (
+                detected_answers.get(
+                    question_number
+                )
+            )
+
+            if technician_answer is None:
+                result = "UNANSWERED"
+            elif technician_answer == correct_answer:
+                result = "CORRECT"
+                correct_count += 1
+            else:
+                result = "WRONG"
+
+            comparisons.append(
+                (
+                    f"Q{question_number}: "
+                    f"Technician="
+                    f"{technician_answer or 'UNANSWERED'} | "
+                    f"Correct={correct_answer} | "
+                    f"{result}"
+                )
+            )
+
+        score = (
+            correct_count
+            / len(expected)
+            * 100
+            if expected
+            else 0.0
+        )
+
+        answer_comparison = (
+            "\n".join(comparisons)
+        )
+
+        wrong_questions = [
+            line
+            for line in comparisons
+            if (
+                "WRONG" in line
+                or "UNANSWERED" in line
+            )
+        ]
+
+        if wrong_questions:
+            analysis_prompt = """
+You are reviewing a marine technician assessment.
+
+The numeric score has already been calculated deterministically.
+Do NOT change the score.
+
+Identify the specific technical topics represented by the incorrect
+or unanswered questions and explain the technician's knowledge gaps.
+
+Return exactly:
+
+FEEDBACK: concise explanation
+MISSED_TOPICS: comma-separated specific technical topics
+
+Use only topics supported by the supplied assessment text.
+Do not invent unrelated topics.
+"""
+
+            try:
+                raw = run_agent(
+                    analysis_prompt,
+                    (
+                        f"ANSWER COMPARISON:\n"
+                        f"{answer_comparison}\n\n"
+                        f"INCORRECT / UNANSWERED:\n"
+                        f"{wrong_questions}\n\n"
+                        f"ASSESSMENT OCR:\n"
+                        f"{extracted}"
+                    ),
+                    "training",
+                )
+            except Exception:
+                raw = ""
+
+            feedback = ""
+            missed_topics: list[str] = []
+
+            if "FEEDBACK:" in raw:
+                feedback = raw.split(
+                    "FEEDBACK:",
+                    1,
+                )[1]
+
+                if "MISSED_TOPICS:" in feedback:
+                    feedback = feedback.split(
+                        "MISSED_TOPICS:",
+                        1,
+                    )[0]
+
+                feedback = feedback.strip()
+
+            if "MISSED_TOPICS:" in raw:
+                topic_text = raw.split(
+                    "MISSED_TOPICS:",
+                    1,
+                )[1].strip()
+
+                missed_topics = [
+                    item.strip(
+                        " -•"
+                    )
+                    for item in re.split(
+                        r",|\n",
+                        topic_text,
+                    )
+                    if item.strip()
+                ]
+
+            if not feedback:
+                feedback = (
+                    f"The technician answered "
+                    f"{correct_count} of "
+                    f"{len(expected)} questions correctly."
+                )
+
+        else:
+            feedback = (
+                f"The technician answered all "
+                f"{len(expected)} questions correctly."
+            )
+            missed_topics = []
+
+        return {
+            "score": max(
+                0.0,
+                min(
+                    100.0,
+                    score,
+                ),
+            ),
+            "feedback": feedback,
+            "missed_topics": missed_topics[:8],
+            "answer_comparison": answer_comparison,
+        }
+
+    # Fallback for assessments where no answer marks could be detected.
+    # Keep the old AI path available, but explicitly report the limitation.
     raw = run_agent(
         """
-Score a marine technician assessment.
+Score a marine technician assessment from the supplied OCR.
 
-The assessment may contain multiple OCR pages. Use ALL pages together.
-
-Return exactly three labelled sections:
+Return exactly:
 
 SCORE_PERCENT: number
 FEEDBACK: concise explanation
 MISSED_TOPICS: comma-separated topics
 
-Rules:
-1. Compare the technician's answers against the supplied answer key.
-2. Calculate the score from the supplied answer key.
-3. Do not guess unreadable answers.
-4. If an answer is unreadable, identify it as unreadable rather than
-   marking it correct.
-5. Identify the technical topic associated with each wrong or unanswered
-   question.
-6. MISSED_TOPICS must contain only areas where the technician needs
-   improvement.
-7. Keep topics specific enough to drive targeted retraining.
-8. Do not include unrelated marine topics.
+Do not guess unreadable or unmarked answers.
+If technician answer marks are not visible in the OCR, say so in FEEDBACK.
 """,
         (
             f"OCR ANSWERS FROM ALL ASSESSMENT PAGES:\n"
@@ -3997,6 +4927,8 @@ Rules:
         else 0.0
     )
 
+    feedback = raw
+
     if "FEEDBACK:" in raw:
         feedback = raw.split(
             "FEEDBACK:",
@@ -4011,9 +4943,6 @@ Rules:
 
         feedback = feedback.strip()
 
-    else:
-        feedback = raw
-
     missed_topics: list[str] = []
 
     if "MISSED_TOPICS:" in raw:
@@ -4023,7 +4952,9 @@ Rules:
         )[1].strip()
 
         missed_topics = [
-            item.strip(" -•")
+            item.strip(
+                " -•"
+            )
             for item in re.split(
                 r",|\n",
                 topic_text,
@@ -4041,6 +4972,10 @@ Rules:
         ),
         "feedback": feedback,
         "missed_topics": missed_topics[:8],
+        "answer_comparison": (
+            "Automatic answer-mark detection "
+            "did not produce a complete answer set."
+        ),
     }
 
 
