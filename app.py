@@ -5262,7 +5262,706 @@ If technician answer marks are not visible in the OCR, say so in FEEDBACK.
         ),
     }
 
+# ============================================================
+# MARINE AI COMMAND CENTER
+# ============================================================
 
+def _command_center_web_text(
+    research: dict[str, Any],
+) -> str:
+    """
+    Convert approved Tavily results into bounded text
+    for the CrewAI agents.
+    """
+
+    parts = []
+
+    for number, item in enumerate(
+        research.get("results", [])[:10],
+        start=1,
+    ):
+
+        title = safe_text(
+            item.get("title")
+        )
+
+        url = safe_text(
+            item.get("url")
+        )
+
+        content = safe_text(
+            item.get("content")
+        )
+
+        parts.append(
+            f"WEB SOURCE {number}\n"
+            f"Title: {title}\n"
+            f"URL: {url}\n"
+            f"Content: {content}"
+        )
+
+    return "\n\n".join(parts)
+
+
+def marine_ai_command_center_page() -> None:
+
+    st.markdown(
+        '<div class="main-title">'
+        "Marine AI Command Center"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div class="main-subtitle">'
+        "CrewAI-powered collaboration between specialist marine agents"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.info(
+        "The Marine AI Command Center is the multi-agent "
+        "orchestration layer of MarineWise. It searches the "
+        "supplied manuals first and then passes evidence between "
+        "specialist CrewAI agents. Online research is never started "
+        "automatically."
+    )
+
+    # ========================================================
+    # AGENT FLOW
+    # ========================================================
+
+    st.markdown(
+        "### CrewAI Agent Workflow"
+    )
+
+    flow_cols = st.columns(5)
+
+    flow = [
+        ("1", "Orchestrator"),
+        ("2", "Evidence Analyst"),
+        ("3", "Web Reviewer"),
+        ("4", "Marine Specialist"),
+        ("5", "Learning Agent"),
+    ]
+
+    for col, (
+        number,
+        label,
+    ) in zip(
+        flow_cols,
+        flow,
+    ):
+
+        col.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-value">{number}</div>
+                <div class="metric-label">{label}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        """
+        <div style="
+            text-align:center;
+            margin:15px 0;
+            font-size:18px;
+            font-weight:600;
+        ">
+            Orchestrator
+            →
+            Evidence Analyst
+            →
+            Marine Specialist
+            →
+            Learning Agent
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.caption(
+        "If approved web evidence is available, the Web Evidence "
+        "Reviewer is inserted between the Evidence Analyst and "
+        "Marine Specialist."
+    )
+
+    # ========================================================
+    # INPUT
+    # ========================================================
+
+    st.markdown(
+        "### 1. Define the Technical Task"
+    )
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+
+        topic = st.text_input(
+            "Topic *",
+            placeholder=(
+                "e.g. Bow thruster hydraulic system"
+            ),
+            key="cc_topic",
+        )
+
+        engine_model = st.text_input(
+            "Engine / Equipment Model",
+            placeholder="Optional",
+            key="cc_engine",
+        )
+
+    with c2:
+
+        ship = st.text_input(
+            "Ship",
+            placeholder="Optional",
+            key="cc_ship",
+        )
+
+        objective = st.text_area(
+            "Command Center Objective",
+            placeholder=(
+                "What should the agents investigate, explain, "
+                "troubleshoot, or turn into a learning plan?"
+            ),
+            height=110,
+            key="cc_objective",
+        )
+
+    # ========================================================
+    # RAG STATUS
+    # ========================================================
+
+    rag = st.session_state.get(
+        "rag"
+    )
+
+    if rag:
+
+        st.success(
+            f"Manual-first RAG is ready: "
+            f"{len(rag['records'])} chunks and "
+            f"{len(rag.get('page_images', {}))} page visuals."
+        )
+
+    else:
+
+        st.warning(
+            "No FAISS manual index is available. "
+            "Build the manual index first for "
+            "source-grounded Command Center results."
+        )
+
+    # ========================================================
+    # RUN BUTTON
+    # ========================================================
+
+    run_button = st.button(
+        "Run Marine AI Command Center",
+        type="primary",
+        use_container_width=True,
+        key="cc_run",
+    )
+
+    if run_button:
+
+        if not topic.strip():
+
+            st.warning(
+                "Enter a topic first."
+            )
+
+            return
+
+        context = ""
+        relevant = []
+
+        # ----------------------------------------------------
+        # MANUAL-FIRST RAG
+        # ----------------------------------------------------
+
+        if rag:
+
+            query_parts = [
+                topic.strip()
+            ]
+
+            if engine_model.strip():
+                query_parts.append(
+                    engine_model.strip()
+                )
+
+            if ship.strip():
+                query_parts.append(
+                    ship.strip()
+                )
+
+            query = " ".join(
+                query_parts
+            )
+
+            with st.spinner(
+                "Step 1 — searching the supplied manuals..."
+            ):
+
+                results = search_index(
+                    rag,
+                    query,
+                    get_embedder(),
+                    k=8,
+                )
+
+                context, relevant = (
+                    retrieve_context(
+                        results,
+                        min_score=0.28,
+                        max_chunks=6,
+                        max_chars=7000,
+                    )
+                )
+
+            st.session_state.last_retrieved = (
+                relevant
+            )
+
+        # ----------------------------------------------------
+        # CREWAI
+        # ----------------------------------------------------
+
+        try:
+
+            with st.spinner(
+                "Step 2 — CrewAI agents are collaborating..."
+            ):
+
+                result = run_marine_command_center(
+                    provider=selected_provider(),
+                    topic=topic,
+                    engine_model=engine_model,
+                    ship=ship,
+                    objective=objective,
+                    manual_context=context,
+                    web_context="",
+                    api_key=require_provider_key(),
+                )
+
+            st.session_state.command_center_result = (
+                result
+            )
+
+            st.session_state.command_center_context = (
+                context
+            )
+
+            st.session_state.command_center_sources = (
+                relevant
+            )
+
+            st.session_state.command_center_web = (
+                None
+            )
+
+            st.session_state.command_center_case = {
+                "topic": topic,
+                "engine_model": engine_model,
+                "ship": ship,
+                "objective": objective,
+            }
+
+        except Exception as exc:
+
+            st.error(
+                f"Command Center failed: {exc}"
+            )
+
+            if (
+                "CrewAI is not installed"
+                in str(exc)
+            ):
+
+                st.code(
+                    "pip install -U crewai",
+                    language="bash",
+                )
+
+            return
+
+    # ========================================================
+    # GET RESULT
+    # ========================================================
+
+    result = st.session_state.get(
+        "command_center_result"
+    )
+
+    context = st.session_state.get(
+        "command_center_context",
+        "",
+    )
+
+    sources = st.session_state.get(
+        "command_center_sources",
+        [],
+    )
+
+    web_research = st.session_state.get(
+        "command_center_web"
+    )
+
+    case = st.session_state.get(
+        "command_center_case",
+        {},
+    )
+
+    if not result:
+        return
+
+    # ========================================================
+    # RESULT
+    # ========================================================
+
+    st.markdown("---")
+
+    st.markdown(
+        "### CrewAI Collaboration Result"
+    )
+
+    agents_used = result.get(
+        "agent_names",
+        [],
+    )
+
+    if agents_used:
+
+        st.caption(
+            "Agents used: "
+            + " → ".join(
+                agents_used
+            )
+        )
+
+    result_tabs = st.tabs(
+        [
+            "Final Marine Insight",
+            "Agent-to-Agent Handoffs",
+            "Manual Evidence",
+        ]
+    )
+
+    # ========================================================
+    # FINAL RESULT
+    # ========================================================
+
+    with result_tabs[0]:
+
+        st.markdown(
+            result.get(
+                "final",
+                "No final result was returned.",
+            )
+        )
+
+        if result.get(
+            "used_web_evidence"
+        ):
+
+            st.caption(
+                "Approved supplementary web evidence "
+                "was included in this run."
+            )
+
+        else:
+
+            st.caption(
+                "No online research was used in this run."
+            )
+
+    # ========================================================
+    # AGENT HANDOFFS
+    # ========================================================
+
+    with result_tabs[1]:
+
+        task_outputs = result.get(
+            "task_outputs",
+            [],
+        )
+
+        if not task_outputs:
+
+            st.info(
+                "No individual task outputs were returned."
+            )
+
+        for index, item in enumerate(
+            task_outputs,
+            start=1,
+        ):
+
+            task_name = item.get(
+                "task",
+                "CrewAI Task",
+            )
+
+            output = item.get(
+                "output",
+                "",
+            )
+
+            with st.expander(
+                f"Agent handoff {index}: {task_name}",
+                expanded=(
+                    index
+                    == len(task_outputs)
+                ),
+            ):
+
+                st.write(
+                    output
+                )
+
+    # ========================================================
+    # MANUAL EVIDENCE
+    # ========================================================
+
+    with result_tabs[2]:
+
+        if sources:
+
+            for source in sources:
+
+                source_name = source.get(
+                    "source",
+                    "Manual",
+                )
+
+                page = source.get(
+                    "page",
+                    "?",
+                )
+
+                st.markdown(
+                    f"**{source_name} — page {page}**"
+                )
+
+                st.write(
+                    source.get(
+                        "text",
+                        "",
+                    )
+                )
+
+        elif context:
+
+            st.write(
+                context
+            )
+
+        else:
+
+            st.warning(
+                "No manual evidence was retrieved."
+            )
+
+    # ========================================================
+    # HUMAN-IN-THE-LOOP WEB FALLBACK
+    # ========================================================
+
+    if not web_research:
+
+        st.markdown("---")
+
+        st.markdown(
+            "### Need Supplementary Online Research?"
+        )
+
+        st.write(
+            "The current CrewAI result is based on the "
+            "supplied manual evidence. If the agents "
+            "identified an evidence gap, you can explicitly "
+            "approve Tavily research here."
+        )
+
+        tavily_key = get_secret(
+            "TAVILY_API_KEY"
+        )
+
+        if not tavily_key:
+
+            st.caption(
+                "TAVILY_API_KEY is not configured, "
+                "so online research is unavailable."
+            )
+
+        elif st.button(
+            "Yes — Search Online with Tavily",
+            key="cc_approve_web",
+        ):
+
+            try:
+
+                with st.spinner(
+                    "Searching approved supplementary sources..."
+                ):
+
+                    research = (
+                        run_training_web_research(
+                            provider=selected_provider(),
+                            engine=case.get(
+                                "engine_model",
+                                "",
+                            ),
+                            topic=case.get(
+                                "topic",
+                                "",
+                            ),
+                            ship=case.get(
+                                "ship",
+                                "",
+                            ),
+                            manual_context=context,
+                            tavily_api_key=tavily_key,
+                        )
+                    )
+
+                web_text = (
+                    _command_center_web_text(
+                        research
+                    )
+                )
+
+                st.session_state.command_center_web = (
+                    research
+                )
+
+                if not web_text:
+
+                    st.warning(
+                        "No web evidence was returned. "
+                        "The manual-only result remains available."
+                    )
+
+                else:
+
+                    with st.spinner(
+                        "Passing approved web evidence "
+                        "to the CrewAI team..."
+                    ):
+
+                        updated = (
+                            run_marine_command_center(
+                                provider=selected_provider(),
+                                topic=case.get(
+                                    "topic",
+                                    "",
+                                ),
+                                engine_model=case.get(
+                                    "engine_model",
+                                    "",
+                                ),
+                                ship=case.get(
+                                    "ship",
+                                    "",
+                                ),
+                                objective=case.get(
+                                    "objective",
+                                    "",
+                                ),
+                                manual_context=context,
+                                web_context=web_text,
+                                api_key=require_provider_key(),
+                            )
+                        )
+
+                    st.session_state.command_center_result = (
+                        updated
+                    )
+
+                    st.rerun()
+
+            except Exception as exc:
+
+                st.error(
+                    f"Approved web research failed: {exc}"
+                )
+
+    # ========================================================
+    # APPROVED WEB SOURCES
+    # ========================================================
+
+    if web_research:
+
+        st.markdown(
+            "### Approved Supplementary Web Evidence"
+        )
+
+        for item in web_research.get(
+            "results",
+            [],
+        )[:8]:
+
+            title = (
+                safe_text(
+                    item.get(
+                        "title"
+                    )
+                )
+                or "Web source"
+            )
+
+            url = safe_text(
+                item.get(
+                    "url"
+                )
+            )
+
+            content = safe_text(
+                item.get(
+                    "content"
+                )
+            )
+
+            with st.expander(
+                title
+            ):
+
+                if url:
+                    st.markdown(
+                        url
+                    )
+
+                st.write(
+                    content
+                )
+
+    # ========================================================
+    # CLEAR RESULT
+    # ========================================================
+
+    if st.button(
+        "Clear Command Center Result",
+        key="cc_clear",
+    ):
+
+        for key in (
+            "command_center_result",
+            "command_center_context",
+            "command_center_sources",
+            "command_center_web",
+            "command_center_case",
+        ):
+
+            st.session_state.pop(
+                key,
+                None,
+            )
+
+        st.rerun()
 # ============================================================
 # LEARNING PAGE
 # ============================================================
@@ -5744,13 +6443,14 @@ def main() -> None:
     sidebar_manuals()
 
     page = st.sidebar.radio(
-        "Navigate",
-        [
-            "Troubleshooting Agent",
-            "Training Agent",
-            "Learning",
-        ],
-    )
+    "Navigate",
+    [
+        "Troubleshooting Agent",
+        "Training Agent",
+        "Marine AI Command Center",
+        "Learning",
+    ],
+)
 
     try:
         if page == "Troubleshooting Agent":
@@ -5797,6 +6497,9 @@ def main() -> None:
 
             with tabs[2]:
                 assessment_page()
+
+                elif page == "Marine AI Command Center":
+            marine_ai_command_center_page()
 
         else:
             learning_page()
