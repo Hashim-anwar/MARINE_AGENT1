@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -1392,16 +1393,42 @@ class MarineGroqCrewLLM(_CrewAIBaseLLM):
             else:
                 sanitized_messages.append(message)
 
+        # Groq's on-demand GPT-OSS tier currently enforces a relatively small
+        # TPM budget for this deployment. CrewAI can otherwise build very large
+        # prompts as task outputs are passed from one agent to the next. Keep
+        # each Command Center call bounded so the multi-agent workflow can run
+        # within that budget. The original MarineWise agents are unaffected.
+        bounded_messages = []
+        total_chars = 0
+        MAX_TOTAL_MESSAGE_CHARS = 8500
+        for message in sanitized_messages:
+            if not isinstance(message, dict):
+                continue
+            clean_message = dict(message)
+            content = clean_message.get("content")
+            if isinstance(content, str):
+                remaining = MAX_TOTAL_MESSAGE_CHARS - total_chars
+                if remaining <= 0:
+                    clean_message["content"] = "[Previous context omitted to stay within the Groq TPM limit.]"
+                elif len(content) > remaining:
+                    clean_message["content"] = content[:remaining] + "\n[Context truncated for Groq TPM safety.]"
+                    total_chars = MAX_TOTAL_MESSAGE_CHARS
+                else:
+                    total_chars += len(content)
+            bounded_messages.append(clean_message)
+
         payload = {
             "model": self.model,
-            "messages": sanitized_messages,
+            "messages": bounded_messages,
             "temperature": self.temperature if self.temperature is not None else 0.2,
             "reasoning_effort": "low",
+            "max_completion_tokens": 700,
         }
 
         max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
         if max_tokens:
-            payload["max_completion_tokens"] = int(max_tokens)
+            # Never allow a CrewAI-generated value to recreate a large request.
+            payload["max_completion_tokens"] = min(int(max_tokens), 700)
 
         if self.stop:
             payload["stop"] = self.stop
@@ -1412,23 +1439,58 @@ class MarineGroqCrewLLM(_CrewAIBaseLLM):
         # separately available CrewAI tool for future extension.
         # Other CrewAI agents do not require tools for their core workflow.
 
-        response = requests.post(
-            self.endpoint,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=180,
-        )
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
 
-        if not response.ok:
+        # A 429 is expected occasionally on Groq's TPM-limited on-demand tier.
+        # Honor the server's requested wait time instead of letting CrewAI
+        # immediately retry the same oversized request several times.
+        last_response = None
+        for attempt in range(2):
+            response = requests.post(
+                self.endpoint,
+                headers=headers,
+                json=payload,
+                timeout=180,
+            )
+            last_response = response
+            if response.status_code != 429:
+                break
+
             try:
                 detail = response.json()
             except Exception:
-                detail = response.text
+                detail = {"error": response.text}
+
+            message_text = ""
+            if isinstance(detail, dict):
+                err = detail.get("error")
+                if isinstance(err, dict):
+                    message_text = str(err.get("message", ""))
+                else:
+                    message_text = str(err or detail)
+
+            wait_match = re.search(r"try again in ([0-9.]+)s", message_text, re.I)
+            wait_seconds = float(wait_match.group(1)) if wait_match else 15.0
+            # Add a small safety margin.
+            time.sleep(min(max(wait_seconds + 1.0, 2.0), 45.0))
+
+        response = last_response
+        if response is None or not response.ok:
+            try:
+                detail = response.json() if response is not None else "No response"
+            except Exception:
+                detail = response.text if response is not None else "No response"
+            if response is not None and response.status_code == 429:
+                raise RuntimeError(
+                    "Groq CrewAI request hit the Groq TPM rate limit even after "
+                    "waiting for the server-provided retry interval. "
+                    f"Details: {detail}"
+                )
             raise RuntimeError(
-                f"Groq CrewAI request failed with HTTP {response.status_code}: {detail}"
+                f"Groq CrewAI request failed with HTTP {response.status_code if response is not None else 'unknown'}: {detail}"
             )
 
         data = response.json()
