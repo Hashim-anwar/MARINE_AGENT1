@@ -1,0 +1,5 @@
+# MarineWise CrewAI support
+crewai[google-genai]
+groq
+google-genai
+requests
