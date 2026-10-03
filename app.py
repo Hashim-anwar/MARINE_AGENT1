@@ -1496,13 +1496,254 @@ def make_process_diagram(
     return buffer.getvalue()
 
 
+def make_topic_plan_visual(
+    engine: str,
+    topic: str,
+    plan: list[dict[str, Any]] | None = None,
+) -> bytes:
+    """Create a topic-aware technical schematic, not a generic architecture card grid.
+
+    Priority:
+      1) classify the requested topic into a marine-system diagram family;
+      2) use source-grounded plan text to enrich labels where possible;
+      3) fall back to a plan-driven process diagram for unfamiliar topics.
+
+    The diagram is deliberately conceptual unless an actual manual figure is supplied
+    elsewhere by the app. It must not invent manufacturer-specific component details.
+    """
+    from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+    import matplotlib.pyplot as plt
+
+    topic_clean = clean_output_text(topic) or "Technical Training Topic"
+    engine_clean = clean_output_text(engine) or "Marine Engine"
+    topic_l = topic_clean.lower()
+
+    # Collect source-grounded plan terms. These are used only as supporting labels;
+    # the system-flow itself is selected from the topic family so the visual is meaningful.
+    plan_items: list[dict[str, Any]] = []
+    for raw in plan or []:
+        if not isinstance(raw, dict):
+            continue
+        title = clean_output_text(raw.get("title", ""))
+        bullets = raw.get("bullets", [])
+        if not isinstance(bullets, list):
+            bullets = [bullets]
+        bullets_clean = [
+            clean_output_text(b) for b in bullets if clean_output_text(b)
+        ]
+        if title:
+            plan_items.append({"title": title, "bullets": bullets_clean})
+
+    def has(*words: str) -> bool:
+        return any(w in topic_l for w in words)
+
+    # Topic-specific marine system families.
+    if has("exhaust", "aftertreatment", "after-treatment", "silencer", "emission"):
+        family = "Exhaust Gas Path"
+        nodes = [
+            ("Engine Cylinders", "Exhaust gas generated"),
+            ("Exhaust Manifold", "Collects exhaust flow"),
+            ("Turbocharger Turbine", "Uses exhaust energy"),
+            ("Exhaust Treatment / Silencer", "Noise / emissions control where fitted"),
+            ("Exhaust Outlet / Stack", "Discharge to atmosphere"),
+        ]
+    elif has("fuel", "injection", "injector", "fuel oil", "diesel supply"):
+        family = "Fuel Supply & Injection Path"
+        nodes = [
+            ("Fuel Source / Tank", "Stored fuel"),
+            ("Strainer / Filter", "Removes contaminants"),
+            ("Fuel Supply", "Delivers fuel to engine"),
+            ("Injection Equipment", "Meters / injects fuel"),
+            ("Cylinders", "Fuel combustion"),
+            ("Return / Recirculation", "Returns excess fuel where applicable"),
+        ]
+    elif has("cooling", "jacket water", "fresh water", "sea water", "seawater", "heat exchanger"):
+        family = "Cooling Circuit"
+        nodes = [
+            ("Cooling Source", "Cooling medium enters circuit"),
+            ("Pump", "Circulates cooling medium"),
+            ("Heat Exchanger / Cooler", "Transfers heat"),
+            ("Engine Cooling Circuit", "Removes engine heat"),
+            ("Temperature Control", "Controls operating temperature"),
+            ("Return", "Cooling medium returns to circuit"),
+        ]
+    elif has("lubric", "lube oil", "lubrication oil", "oil system", "oil filter"):
+        family = "Lubricating Oil Circuit"
+        nodes = [
+            ("Oil Sump / Tank", "Lubricant reservoir"),
+            ("Lube Oil Pump", "Builds circulation flow"),
+            ("Filter", "Removes contaminants"),
+            ("Oil Cooler", "Controls oil temperature where fitted"),
+            ("Engine Lubrication Points", "Lubricates moving components"),
+            ("Return", "Oil drains back to reservoir"),
+        ]
+    elif has("turbocharger", "turbo charger", "boost", "charge air", "charge-air"):
+        family = "Turbocharging & Charge-Air Path"
+        nodes = [
+            ("Exhaust Gas", "Energy source"),
+            ("Turbine", "Converts exhaust energy"),
+            ("Common Shaft", "Transfers rotational energy"),
+            ("Compressor", "Compresses intake air"),
+            ("Charge-Air Cooler", "Cools compressed air where fitted"),
+            ("Engine Intake", "Supplies combustion air"),
+        ]
+    elif has("starting", "starter", "start system", "cranking"):
+        family = "Engine Starting Sequence"
+        nodes = [
+            ("Starting Source", "Electrical / pneumatic source as documented"),
+            ("Start Control", "Initiates starting sequence"),
+            ("Starter", "Applies cranking torque"),
+            ("Flywheel / Crankshaft", "Turns engine"),
+            ("Fuel + Air Enable", "Supports engine firing"),
+            ("Engine Running", "Starting sequence completes"),
+        ]
+    elif has("electrical", "alternator", "generator", "charging", "battery", "switchboard"):
+        family = "Electrical / Charging Path"
+        nodes = [
+            ("Prime Mover", "Mechanical input"),
+            ("Alternator / Generator", "Produces electrical power"),
+            ("Regulation / Protection", "Controls and protects output"),
+            ("Battery / Switchboard", "Stores or distributes power"),
+            ("Electrical Loads", "Consume generated power"),
+            ("Feedback / Monitoring", "Voltage / current / alarms"),
+        ]
+    elif has("governor", "speed control", "engine control", "ecu", "control system", "automation"):
+        family = "Engine Control & Feedback"
+        nodes = [
+            ("Speed / Load Demand", "Operating demand"),
+            ("Controller / Governor", "Processes demand"),
+            ("Actuator", "Commands engine response"),
+            ("Fuel / Engine Response", "Changes engine output"),
+            ("Speed / Load Feedback", "Measures actual response"),
+            ("Control Correction", "Closes the control loop"),
+        ]
+    elif has("air intake", "intake air", "air filter", "induction"):
+        family = "Engine Air Intake Path"
+        nodes = [
+            ("Ambient Air", "Intake air source"),
+            ("Air Filter", "Removes contaminants"),
+            ("Compressor / Turbocharger", "Raises intake pressure where fitted"),
+            ("Charge-Air Cooler", "Controls charge-air temperature where fitted"),
+            ("Intake Manifold", "Distributes air"),
+            ("Engine Cylinders", "Combustion air enters cylinders"),
+        ]
+    else:
+        # Unknown topic: derive a genuine flow from the plan instead of using
+        # a universal INPUT -> CONTROL -> ENGINE -> MONITOR architecture.
+        family = f"{topic_clean} — Technical Process"
+        candidates = []
+        for item in plan_items:
+            title = item["title"]
+            if title not in [x[0] for x in candidates]:
+                candidates.append((title, "Source-grounded training stage"))
+        nodes = candidates[:6]
+        if len(nodes) < 4:
+            nodes = [
+                (f"{topic_clean} — Function", "Purpose and operating role"),
+                (f"{topic_clean} — Components", "Main components documented in source"),
+                (f"{topic_clean} — Operation", "Normal operating sequence"),
+                (f"{topic_clean} — Verification", "Technician checks and indications"),
+                (f"{topic_clean} — Faults", "Documented fault / diagnosis path"),
+            ]
+
+    # Compact long labels while preserving the actual technical wording.
+    nodes = nodes[:6]
+
+    fig, ax = plt.subplots(figsize=(13.33, 6.2))
+    ax.set_xlim(0, 13.33)
+    ax.set_ylim(0, 6.2)
+    ax.axis("off")
+
+    ax.text(
+        6.665, 5.72, f"{engine_clean} — {topic_clean}",
+        ha="center", va="center", fontsize=18, fontweight="bold",
+    )
+    ax.text(
+        6.665, 5.30, family,
+        ha="center", va="center", fontsize=10, fontweight="bold",
+    )
+    ax.text(
+        6.665, 5.00,
+        "Conceptual training schematic — verify component arrangement against the supplied manual",
+        ha="center", va="center", fontsize=8.5,
+    )
+
+    n = len(nodes)
+    card_w = 1.85 if n >= 6 else 2.05
+    card_h = 1.45
+    gap = 0.28
+    total_w = n * card_w + (n - 1) * gap
+    start_x = (13.33 - total_w) / 2
+    y = 2.65
+
+    # Use the plan to provide a small evidence note, without replacing the system flow.
+    plan_text = ""
+    if plan_items:
+        relevant = plan_items[0]["title"]
+        plan_text = f"Training plan: {relevant}"
+
+    for i, (title, desc) in enumerate(nodes):
+        x = start_x + i * (card_w + gap)
+        patch = FancyBboxPatch(
+            (x, y), card_w, card_h,
+            boxstyle="round,pad=0.06,rounding_size=0.08",
+            linewidth=1.5,
+        )
+        ax.add_patch(patch)
+        ax.text(
+            x + card_w / 2, y + 0.98,
+            textwrap.fill(clean_output_text(title), width=20),
+            ha="center", va="center", fontsize=9.8, fontweight="bold",
+        )
+        ax.text(
+            x + card_w / 2, y + 0.38,
+            textwrap.fill(clean_output_text(desc), width=24),
+            ha="center", va="center", fontsize=7.6,
+        )
+
+        if i < n - 1:
+            x1 = x + card_w + 0.02
+            x2 = x + card_w + gap - 0.02
+            arrow = FancyArrowPatch(
+                (x1, y + card_h / 2),
+                (x2, y + card_h / 2),
+                arrowstyle="-|>",
+                mutation_scale=13,
+                linewidth=1.4,
+            )
+            ax.add_patch(arrow)
+
+    # A restrained evidence footer makes it clear this is a training schematic,
+    # while the actual manual figure (when available) remains the preferred visual.
+    ax.text(
+        0.55, 0.55,
+        "Source priority: relevant manual figure/page first; this schematic is used only when a suitable figure is unavailable.",
+        ha="left", va="center", fontsize=7.6,
+    )
+    if plan_text:
+        ax.text(
+            12.78, 0.55,
+            textwrap.fill(plan_text, width=34),
+            ha="right", va="center", fontsize=7.2,
+        )
+
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return buffer.getvalue()
+
 def make_training_diagram(
     engine: str,
     topic: str,
+    plan: list[dict[str, Any]] | None = None,
 ) -> bytes:
-    return make_system_diagram(
+    # Use the real topic/presentation plan. The legacy fixed
+    # architecture is retained above only for backward compatibility
+    # with any other internal caller, but is no longer used here.
+    return make_topic_plan_visual(
         engine,
         topic,
+        plan,
     )
 
 
@@ -2344,19 +2585,34 @@ def training_material_page() -> None:
     with st.form(
         "professional_training_material_form"
     ):
+        # Topic is the primary training input. Engine model and ship are
+        # optional context fields so the Training Agent can also handle
+        # workshop/marine-mechanical topics that are not engine-specific.
+        topic = st.text_input(
+            "Training Topic *",
+            placeholder="Bow Thruster / Shaft Alignment / Propeller / Cooling System",
+            help=(
+                "Enter the technical subject first. This can be an engine topic, "
+                "marine propulsion topic, workshop topic, deck machinery topic, "
+                "or another mechanical training subject."
+            ),
+        )
+
         engine = st.text_input(
-            "Engine Model",
+            "Engine Model (Optional)",
             placeholder="MTU 16V 4000 M90",
+            help=(
+                "Optional. Use this when the training needs to be specific to an "
+                "engine/model. Leave blank for general mechanical or marine topics."
+            ),
         )
 
         ship = st.text_input(
-            "Ship",
+            "Ship (Optional)",
             placeholder="MV Example",
-        )
-
-        topic = st.text_input(
-            "Training Topic",
-            placeholder="Cooling System",
+            help=(
+                "Optional. Use this when the training should be specific to a ship."
+            ),
         )
 
         c1, c2, c3 = st.columns(3)
@@ -2384,11 +2640,20 @@ def training_material_page() -> None:
     if not submitted:
         return
 
-    if not engine.strip() or not topic.strip():
+    if not topic.strip():
         st.warning(
-            "Enter an engine model and training topic."
+            "Enter a training topic first. Engine Model and Ship are optional."
         )
         return
+
+    # Build a clean optional context string. Do not force an engine model into
+    # retrieval, research, prompts, or output when the user leaves it blank.
+    training_context = " ".join(
+        part.strip()
+        for part in [engine, ship]
+        if part and part.strip()
+    )
+    retrieval_prefix = f"{training_context} " if training_context else ""
 
     if not any(
         [
@@ -2417,13 +2682,13 @@ def training_material_page() -> None:
         ):
             primary_results = search_index(
                 rag,
-                f"{engine} {topic} system components operation troubleshooting",
+                f"{retrieval_prefix}{topic} system components operation troubleshooting",
                 get_embedder(),
                 k=10,
             )
             visual_results = search_index(
                 rag,
-                f"{engine} {topic} diagram schematic architecture components",
+                f"{retrieval_prefix}{topic} diagram schematic architecture components",
                 get_embedder(),
                 k=10,
             )
@@ -2902,6 +3167,7 @@ Keep the material practical and understandable.
     diagram = make_training_diagram(
         engine,
         topic,
+        plan,
     )
 
     st.markdown(
@@ -4272,26 +4538,6 @@ information when they differ or when the manual does not cover a point.
             remedial_content
         )
 
-        diagram = make_training_diagram(
-            engine.strip()
-            or "Marine engine",
-            remedial_topic,
-        )
-
-        st.markdown(
-            "### Targeted Training Diagram"
-        )
-
-        st.image(
-            diagram,
-            caption=(
-                "Training diagram for the identified "
-                "improvement areas. Verify engine-specific "
-                "architecture against the current manual."
-            ),
-            use_container_width=True,
-        )
-
         remedial_plan: list[dict[str, Any]] = []
 
         if generate_training_presentation_plan is not None:
@@ -4369,6 +4615,26 @@ information when they differ or when the manual does not cover a point.
                     "visual_type": "process",
                 },
             ]
+
+        diagram = make_training_diagram(
+            engine.strip()
+            or "Marine engine",
+            remedial_topic,
+            remedial_plan,
+        )
+
+        st.markdown(
+            "### Targeted Training Diagram"
+        )
+
+        st.image(
+            diagram,
+            caption=(
+                "Topic-specific retraining visual based on the identified "
+                "improvement areas and source-grounded training plan."
+            ),
+            use_container_width=True,
+        )
 
         ppt_bytes = (
             make_professional_training_ppt(
