@@ -1,7 +1,7 @@
 """
-MarineWise AI - AI agents, Tavily research, and presentation planning.
+MarineWise AI - AI agents, Tavily research, presentation planning, and CrewAI orchestration.
 
-No CrewAI or LiteLLM is used.
+CrewAI is used by the Marine AI Command Center. Existing direct Groq/Gemini functions remain available for the original app pages.
 """
 
 from __future__ import annotations
@@ -13,6 +13,20 @@ from dataclasses import dataclass
 from typing import Any
 
 import requests
+
+# CrewAI is intentionally optional at import time so the existing
+# Troubleshooting/Training pages can still load before the dependency is installed.
+# The Command Center raises a clear installation error if CrewAI is unavailable.
+try:
+    from crewai import Agent, Crew, Process, Task, LLM
+    from crewai.tools import BaseTool
+    CREWAI_AVAILABLE = True
+    CREWAI_IMPORT_ERROR = ""
+except Exception as _crewai_exc:
+    Agent = Crew = Process = Task = LLM = None
+    BaseTool = None
+    CREWAI_AVAILABLE = False
+    CREWAI_IMPORT_ERROR = str(_crewai_exc)
 
 
 # ============================================================
@@ -1271,41 +1285,120 @@ JSON format example:
 
         "slides": normalized,
     }
+
 # ============================================================
 # CREWAI MARINE AI COMMAND CENTER
 # ============================================================
+#
+# This is a REAL CrewAI implementation:
+#   - Agent objects are created with crewai.Agent
+#   - Task objects are created with crewai.Task
+#   - A Crew object orchestrates them
+#   - Process.sequential passes completed task outputs into later tasks
+#   - The approved Tavily search is exposed as a real CrewAI BaseTool
+#
+# The original direct SDK functions above are intentionally preserved so
+# Troubleshooting, Training, Quiz and Presentation pages are not disturbed.
+# The new Command Center uses CrewAI end-to-end.
 
-def _make_crewai_llm(provider: str, api_key: str):
-    """Create a CrewAI LLM adapter for the selected provider."""
-    from crewai import LLM
+if CREWAI_AVAILABLE:
+    class MarineTavilySearchTool(BaseTool):
+        """CrewAI tool that searches Tavily for approved marine research."""
+
+        name: str = "marine_tavily_search"
+        description: str = (
+            "Search Tavily for current marine-engine technical information. "
+            "Use only when the user has already approved online research. "
+            "Return titles, URLs and concise evidence."
+        )
+
+        def _run(self, query: str) -> str:
+            try:
+                key = _get_tavily_key()
+                data = _tavily_search(
+                    query,
+                    key,
+                    max_results=5,
+                    include_images=False,
+                )
+                results = data.get("results", [])
+                if not results:
+                    return "No Tavily results were returned."
+
+                blocks = []
+                for i, item in enumerate(results, start=1):
+                    blocks.append(
+                        f"SOURCE {i}\n"
+                        f"Title: {_to_text(item.get('title'))}\n"
+                        f"URL: {_to_text(item.get('url'))}\n"
+                        f"Evidence: {_to_text(item.get('content'))}"
+                    )
+                return _bounded("\n\n".join(blocks), 7000)
+            except Exception as exc:
+                return f"Tavily search failed: {exc}"
+
+
+def _crewai_llm(provider: str, api_key: str):
+    """Create the CrewAI LLM used by every MarineWise Command Center agent."""
+    if not CREWAI_AVAILABLE:
+        raise RuntimeError(
+            "CrewAI is not installed. Install the 'crewai' package before "
+            "using Marine AI Command Center."
+        )
 
     provider_clean = _clean_text(provider).lower()
+    key = _get_key(provider_clean, api_key)
+
+    # CrewAI uses provider-prefixed model identifiers for its LLM abstraction.
+    # This keeps the selected provider explicit; it does NOT silently switch
+    # Gemini to Groq or vice versa.
+    if provider_clean == "groq":
+        model = f"groq/{GROQ_MODEL}"
+    elif provider_clean == "gemini":
+        model = f"gemini/{GEMINI_MODEL}"
+    else:
+        raise ValueError(f"Unsupported CrewAI provider: {provider_clean}")
+
     if provider_clean == "groq":
         return LLM(
-            model=GROQ_MODEL,
+            model=model,
+            api_key=key,
             base_url="https://api.groq.com/openai/v1",
-            api_key=_to_text(api_key),
-            max_tokens=1200,
         )
 
-    if provider_clean == "gemini":
-        return LLM(
-            model=f"gemini/{GEMINI_MODEL}",
-            api_key=_to_text(api_key),
-            max_tokens=1200,
-        )
-
-    raise ValueError("Provider must be Groq or Gemini.")
+    return LLM(
+        model=model,
+        api_key=key,
+    )
 
 
-def _crewai_output_text(output: Any) -> str:
-    """Safely convert CrewAI task/crew output to text."""
-    if output is None:
+def _crew_output_text(value: Any) -> str:
+    """Extract readable text from CrewAI CrewOutput/TaskOutput objects."""
+    if value is None:
         return ""
-    raw = getattr(output, "raw", None)
-    if raw is not None:
+
+    raw = getattr(value, "raw", None)
+    if raw:
         return _to_text(raw)
-    return _to_text(output)
+
+    output = getattr(value, "output", None)
+    if output:
+        return _to_text(output)
+
+    return _to_text(value)
+
+
+def _task_output_record(task: Any) -> dict[str, str]:
+    """Convert a CrewAI task output to the Command Center UI format."""
+    output = getattr(task, "output", None)
+    return {
+        "agent": _to_text(getattr(getattr(task, "agent", None), "role", "")),
+        "task": _bounded(
+            _to_text(getattr(task, "description", "")),
+            500,
+        ),
+        "output": _bounded(_crew_output_text(output), 5000),
+    }
 
 
 def run_marine_command_center(
@@ -1314,211 +1407,289 @@ def run_marine_command_center(
     engine_model: str = "",
     ship: str = "",
     objective: str = "",
-    manual_context: str = "",
-    web_context: str = "",
-    api_key: str | None = None,
+    manual_context: Any = "",
+    web_context: Any = "",
+    api_key: str = "",
 ) -> dict[str, Any]:
-    """Run the MarineWise CrewAI Command Center.
-
-    Workflow:
-    Orchestrator -> Manual Evidence -> optional Web Evidence ->
-    Technical Specialist -> Learning/Action.
-
-    Manual evidence is always presented as the primary source. Web evidence
-    is optional and must be supplied by the UI only after explicit approval.
     """
-    try:
-        from crewai import Agent, Crew, Process, Task
-    except ImportError as exc:
+    Run the MarineWise multi-agent Command Center with REAL CrewAI.
+
+    Collaboration chain:
+
+        Orchestrator Agent
+              |
+              v
+        Manual/RAG Analyst
+              |
+              +----> Research Agent + Tavily (ONLY when web evidence exists,
+              |      which means the user already approved web research)
+              |
+              v
+        Marine Technical Specialist
+              |
+              v
+        Technician Action Agent
+              |
+              v
+        Crew final output
+
+    The manual evidence is supplied by MarineWise's existing FAISS/RAG layer.
+    The Research Agent is not created at all when web_context is empty, so
+    the Command Center cannot silently perform online research.
+    """
+
+    if not CREWAI_AVAILABLE:
         raise RuntimeError(
-            "CrewAI is not installed. Add 'crewai' to requirements.txt and redeploy."
-        ) from exc
+            "CrewAI is not installed. Add 'crewai' to requirements.txt and "
+            "install it before using Marine AI Command Center. "
+            f"Import detail: {CREWAI_IMPORT_ERROR}"
+        )
 
-    provider_clean = _clean_text(provider)
-    topic = _clean_text(topic)
-    engine_model = _clean_text(engine_model)
-    ship = _clean_text(ship)
-    objective = _clean_text(objective)
-    manual_context = _to_text(manual_context)
-    web_context = _to_text(web_context)
+    provider_clean = _clean_text(provider).lower()
+    topic_clean = _clean_text(topic)
+    engine_clean = _clean_text(engine_model)
+    ship_clean = _clean_text(ship)
+    objective_clean = _clean_text(objective)
+    manual_text = _bounded(manual_context, 9000)
+    web_text = _bounded(web_context, 8000)
 
-    if not topic:
-        raise ValueError("A training/troubleshooting topic is required.")
+    if not topic_clean:
+        raise ValueError("A technical topic is required for the Command Center.")
 
-    key = _get_key(provider_clean, api_key)
-    llm = _make_crewai_llm(provider_clean, key)
+    if not manual_text:
+        manual_text = (
+            "NO MANUAL/RAG EVIDENCE WAS RETRIEVED. Do not invent manufacturer "
+            "specifications, limits, procedures, locations or measurements."
+        )
 
-    case = (
-        f"TOPIC: {topic}\n"
-        f"ENGINE/EQUIPMENT MODEL: {engine_model or 'Not specified'}\n"
-        f"SHIP: {ship or 'Not specified'}\n"
-        f"OBJECTIVE: {objective or 'Not specified'}"
+    # Presence of web_context is the approval gate used by the current app:
+    # the app only creates this context after the user clicks Search Online.
+    web_approved = bool(web_text)
+
+    llm = _crewai_llm(provider_clean, api_key)
+
+    case_summary = (
+        f"TOPIC: {topic_clean}\n"
+        f"ENGINE/EQUIPMENT MODEL: {engine_clean or 'Not specified'}\n"
+        f"SHIP: {ship_clean or 'Not specified'}\n"
+        f"TECHNICAL OBJECTIVE: {objective_clean or 'Not specified'}"
     )
 
-    manual_evidence = _bounded(manual_context, 10000)
-    web_evidence = _bounded(web_context, 8000)
-
-    agents = []
-
+    # --------------------------------------------------------
+    # 1. Orchestrator
+    # --------------------------------------------------------
     orchestrator = Agent(
         role="Marine AI Orchestrator",
         goal=(
-            "Coordinate marine technical agents, preserve evidence hierarchy, "
-            "and ensure the final answer is traceable and practical."
+            "Coordinate a disciplined marine technical investigation. "
+            "Keep manual/RAG evidence primary, identify evidence gaps, "
+            "and pass a clear plan to the specialist agents."
         ),
         backstory=(
-            "You coordinate a team of marine engineering specialists. "
-            "You never replace manufacturer evidence with unsupported assumptions."
+            "You are the lead coordinator of MarineWise. You do not invent "
+            "technical facts. You organize the evidence and decide which "
+            "specialist should address each part of the case."
         ),
         llm=llm,
-        verbose=False,
         allow_delegation=False,
-    )
-    agents.append(orchestrator)
-
-    manual_agent = Agent(
-        role="Marine Manual Evidence Analyst",
-        goal=(
-            "Extract only relevant, supportable technical facts from the supplied "
-            "manual evidence and identify gaps."
-        ),
-        backstory=(
-            "You are a marine documentation specialist. Manufacturer manuals are "
-            "your primary authority for equipment-specific facts and procedures."
-        ),
-        llm=llm,
         verbose=False,
-        allow_delegation=False,
+        max_iter=3,
     )
-    agents.append(manual_agent)
 
-    web_agent = None
-    if web_evidence:
-        web_agent = Agent(
-            role="Marine Web Evidence Reviewer",
-            goal=(
-                "Review explicitly approved web evidence as supplementary information "
-                "and distinguish it from manufacturer/manual evidence."
-            ),
-            backstory=(
-                "You are a technical research reviewer. You do not silently treat web "
-                "claims as manufacturer instructions."
-            ),
-            llm=llm,
-            verbose=False,
-            allow_delegation=False,
-        )
-        agents.append(web_agent)
-
-    specialist = Agent(
-        role="Senior Marine Technical Specialist",
-        goal=(
-            "Produce a technically grounded explanation, diagnostic reasoning, "
-            "operating sequence, and technician-focused checks for the requested topic."
-        ),
-        backstory=(
-            "You are an experienced marine engineer. You distinguish confirmed facts "
-            "from assumptions and explicitly flag information that must be verified."
-        ),
-        llm=llm,
-        verbose=False,
-        allow_delegation=False,
-    )
-    agents.append(specialist)
-
-    learning_agent = Agent(
-        role="Marine Learning and Action Specialist",
-        goal=(
-            "Turn the technical analysis into practical technician actions, learning "
-            "points, verification steps, and clearly labelled evidence gaps."
-        ),
-        backstory=(
-            "You are a marine technical instructor who converts engineering evidence "
-            "into safe, usable technician guidance without inventing specifications."
-        ),
-        llm=llm,
-        verbose=False,
-        allow_delegation=False,
-    )
-    agents.append(learning_agent)
-
-    task_orchestrate = Task(
+    orchestration_task = Task(
         description=(
-            f"{case}\n\n"
-            "Define the technical question and the evidence that the team must use. "
-            "The manual is primary. Web evidence is supplementary only if provided."
+            f"Review this marine technical case:\n{case_summary}\n\n"
+            "Create a concise collaboration plan. Identify the key technical "
+            "questions, the evidence that must be verified, and what the "
+            "downstream Marine Technical Specialist must not assume."
         ),
-        expected_output="A concise evidence and task brief for the technical team.",
+        expected_output=(
+            "A concise technical investigation plan with evidence priorities "
+            "and explicit warnings about unsupported assumptions."
+        ),
         agent=orchestrator,
     )
 
-    task_manual = Task(
-        description=(
-            f"CASE:\n{case}\n\n"
-            f"MANUAL EVIDENCE:\n{manual_evidence or 'No manual evidence was retrieved.'}\n\n"
-            "Extract relevant facts, procedures, component relationships, warnings, "
-            "and source/page clues that are actually supported. Identify missing evidence."
+    # --------------------------------------------------------
+    # 2. Manual/RAG Analyst
+    # --------------------------------------------------------
+    manual_agent = Agent(
+        role="Marine Manual and RAG Evidence Analyst",
+        goal=(
+            "Extract only technically supported facts from the supplied "
+            "MarineWise manual/RAG evidence and identify missing evidence."
         ),
-        expected_output="A source-grounded manual evidence report with limitations.",
-        agent=manual_agent,
-        context=[task_orchestrate],
+        backstory=(
+            "You are a marine documentation specialist. You distinguish "
+            "manufacturer evidence from generic knowledge and never fill a "
+            "missing specification with a guess."
+        ),
+        llm=llm,
+        allow_delegation=False,
+        verbose=False,
+        max_iter=3,
     )
 
-    tasks = [task_orchestrate, task_manual]
-
-    task_web = None
-    if web_agent is not None:
-        task_web = Task(
-            description=(
-                f"CASE:\n{case}\n\n"
-                f"APPROVED WEB EVIDENCE:\n{web_evidence}\n\n"
-                "Review the web evidence only as supplementary information. "
-                "Identify source claims and do not override manufacturer evidence."
-            ),
-            expected_output="A clearly separated supplementary web evidence report.",
-            agent=web_agent,
-            context=[task_orchestrate, task_manual],
-        )
-        tasks.append(task_web)
-
-    specialist_context = [task_orchestrate, task_manual]
-    if task_web is not None:
-        specialist_context.append(task_web)
-
-    task_specialist = Task(
+    manual_task = Task(
         description=(
-            f"CASE:\n{case}\n\n"
-            "Develop the final technical analysis. Cover: system purpose, relevant "
-            "components, operating sequence, diagnostic/inspection logic, safety, "
-            "and what must be verified before action. Do not invent specifications, "
-            "locations, measurements, alarm limits, or manufacturer procedures."
+            f"CASE:\n{case_summary}\n\n"
+            f"MANUAL/RAG EVIDENCE:\n{manual_text}\n\n"
+            "Analyze the supplied evidence. Extract relevant components, "
+            "operating relationships, procedures, checks, warnings, "
+            "measurements and source references only when actually supported. "
+            "Explicitly list important information that the evidence does not "
+            "support. Do not use generic marine knowledge to fill gaps."
         ),
-        expected_output="A technically grounded marine specialist analysis.",
+        expected_output=(
+            "A manual-grounded evidence brief containing supported facts, "
+            "relevant source details, and an explicit evidence-gap list."
+        ),
+        agent=manual_agent,
+        context=[orchestration_task],
+    )
+
+    agents = [orchestrator, manual_agent]
+    tasks = [orchestration_task, manual_task]
+    research_agent = None
+    research_task = None
+
+    # --------------------------------------------------------
+    # 3. Optional Research Agent + real Tavily tool
+    # --------------------------------------------------------
+    if web_approved:
+        tavily_tool = MarineTavilySearchTool()
+
+        research_agent = Agent(
+            role="Marine Web Research Agent",
+            goal=(
+                "Review approved online evidence and, when useful, validate "
+                "or supplement the case using the Tavily search tool. "
+                "Clearly separate web evidence from manual evidence."
+            ),
+            backstory=(
+                "You are a marine technical researcher. Online information is "
+                "secondary to the supplied manual. You search only because "
+                "the user has explicitly approved online research."
+            ),
+            llm=llm,
+            tools=[tavily_tool],
+            allow_delegation=False,
+            verbose=False,
+            max_iter=3,
+        )
+
+        research_task = Task(
+            description=(
+                f"CASE:\n{case_summary}\n\n"
+                f"APPROVED WEB EVIDENCE:\n{web_text}\n\n"
+                "Review the approved web evidence. You may use the attached "
+                "Tavily tool to validate or supplement important points, but "
+                "do not replace manufacturer-specific instructions with generic "
+                "web content. For every important web-derived point, retain the "
+                "source title/URL when available. Flag conflicts with the "
+                "manual rather than deciding silently which source is correct."
+            ),
+            expected_output=(
+                "A concise secondary research brief with source URLs, validated "
+                "facts, unresolved conflicts and limitations."
+            ),
+            agent=research_agent,
+            context=[orchestration_task, manual_task],
+            tools=[tavily_tool],
+        )
+        agents.append(research_agent)
+        tasks.append(research_task)
+
+    # --------------------------------------------------------
+    # 4. Marine Technical Specialist
+    # --------------------------------------------------------
+    specialist = Agent(
+        role="Marine Technical Specialist",
+        goal=(
+            "Synthesize the evidence into a technically disciplined answer "
+            "for a marine engineer or technician without inventing unsupported "
+            "specifications or procedures."
+        ),
+        backstory=(
+            "You are an experienced marine technical specialist. You reason "
+            "from evidence, distinguish confirmed facts from possibilities, "
+            "and prioritize safe, manufacturer-supported actions."
+        ),
+        llm=llm,
+        allow_delegation=False,
+        verbose=False,
+        max_iter=4,
+    )
+
+    specialist_context = [orchestration_task, manual_task]
+    if research_task is not None:
+        specialist_context.append(research_task)
+
+    specialist_task = Task(
+        description=(
+            f"CASE:\n{case_summary}\n\n"
+            "Using the upstream agent outputs, build the technical answer. "
+            "Explain the relevant system/components, operating sequence, "
+            "diagnostic logic or training points as appropriate to the topic. "
+            "Separate confirmed manual facts, secondary web evidence and "
+            "reasonable but unconfirmed possibilities. Never invent values, "
+            "alarm limits, component locations, tolerances or maintenance "
+            "intervals. If evidence is insufficient, say so."
+        ),
+        expected_output=(
+            "A technically grounded synthesis suitable for the final technician "
+            "response, with evidence status and limitations clearly stated."
+        ),
         agent=specialist,
         context=specialist_context,
     )
-    tasks.append(task_specialist)
+    agents.append(specialist)
+    tasks.append(specialist_task)
 
-    task_learning = Task(
-        description=(
-            f"CASE:\n{case}\n\n"
-            "Convert the specialist analysis into a practical final response. Use this "
-            "structure:\n"
-            "1. Technical summary\n"
-            "2. System/operating sequence\n"
-            "3. Technician checks or actions\n"
-            "4. Safety/isolation considerations\n"
-            "5. What is confirmed by evidence\n"
-            "6. What requires verification\n"
-            "7. Key learning points\n"
-            "Clearly identify when manual evidence was unavailable."
+    # --------------------------------------------------------
+    # 5. Technician Action Agent
+    # --------------------------------------------------------
+    action_agent = Agent(
+        role="Marine Technician Action and Learning Agent",
+        goal=(
+            "Turn the specialist synthesis into a clear, practical and safe "
+            "technician-facing response while preserving evidence boundaries."
         ),
-        expected_output="A professional technician-ready final MarineWise response.",
-        agent=learning_agent,
-        context=[task_specialist],
+        backstory=(
+            "You are the final MarineWise technician communication specialist. "
+            "Your output must be useful at the worksite or in training, but you "
+            "must never turn an unsupported assumption into an instruction."
+        ),
+        llm=llm,
+        allow_delegation=False,
+        verbose=False,
+        max_iter=4,
     )
-    tasks.append(task_learning)
 
+    action_task = Task(
+        description=(
+            f"CASE:\n{case_summary}\n\n"
+            "Create the final MarineWise response from the specialist output. "
+            "Use clear headings and practical steps where appropriate. Include "
+            "safety/isolation considerations when supported by the evidence. "
+            "Clearly label unsupported or unverified items. End with a short "
+            "'Evidence and limitations' section stating that manufacturer "
+            "documentation remains authoritative. Do not fabricate sources."
+        ),
+        expected_output=(
+            "A professional technician-facing final response with clear "
+            "technical reasoning, practical actions, safety notes, and evidence "
+            "limitations."
+        ),
+        agent=action_agent,
+        context=[specialist_task],
+    )
+    agents.append(action_agent)
+    tasks.append(action_task)
+
+    # --------------------------------------------------------
+    # REAL CREWAI CREW
+    # --------------------------------------------------------
     crew = Crew(
         agents=agents,
         tasks=tasks,
@@ -1527,29 +1698,27 @@ def run_marine_command_center(
     )
 
     result = crew.kickoff()
+    final_text = _crew_output_text(result)
 
-    task_outputs = []
-    for task in tasks:
-        output = getattr(task, "output", None)
-        text = _crewai_output_text(output)
-        if text:
-            task_outputs.append({
-                "agent": _to_text(getattr(task.agent, "role", "Marine Agent")),
-                "output": text,
-            })
-
-    final_text = _crewai_output_text(result)
-    if not final_text and task_outputs:
-        final_text = task_outputs[-1]["output"]
+    task_outputs = [
+        _task_output_record(task)
+        for task in tasks
+        if getattr(task, "output", None) is not None
+    ]
 
     return {
-        "final": final_text or "CrewAI returned no final response.",
-        "agent_names": [agent.role for agent in agents],
+        "final": final_text,
+        "agent_names": [
+            _to_text(getattr(agent, "role", ""))
+            for agent in agents
+        ],
         "task_outputs": task_outputs,
-        "used_web_evidence": bool(web_evidence),
-        "used_manual_evidence": bool(manual_context),
-        "topic": topic,
-        "engine_model": engine_model,
-        "ship": ship,
-        "objective": objective,
+        "used_crewai": True,
+        "used_web_evidence": web_approved,
+        "used_tavily_tool": web_approved,
+        "provider": provider_clean,
+        "topic": topic_clean,
+        "engine_model": engine_clean,
+        "ship": ship_clean,
+        "objective": objective_clean,
     }
