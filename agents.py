@@ -1371,11 +1371,30 @@ class MarineGroqCrewLLM(_CrewAIBaseLLM):
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
 
-        # CrewAI may pass internal metadata/parameters that Groq does not need.
-        # Only forward parameters supported by the Groq Chat Completions API.
+        # CrewAI may attach internal metadata to messages. In particular,
+        # recent CrewAI versions can add `cache_breakpoint`, which is a
+        # CrewAI/provider-side field and is NOT accepted by Groq's Chat
+        # Completions endpoint. Send only the message fields Groq supports.
+        sanitized_messages = []
+        for message in messages:
+            if isinstance(message, dict):
+                clean_message = {}
+                for key in (
+                    "role",
+                    "content",
+                    "name",
+                    "tool_call_id",
+                    "tool_calls",
+                ):
+                    if key in message and message[key] is not None:
+                        clean_message[key] = message[key]
+                sanitized_messages.append(clean_message)
+            else:
+                sanitized_messages.append(message)
+
         payload = {
             "model": self.model,
-            "messages": messages,
+            "messages": sanitized_messages,
             "temperature": self.temperature if self.temperature is not None else 0.2,
             "reasoning_effort": "low",
         }
