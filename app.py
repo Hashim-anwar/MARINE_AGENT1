@@ -1442,8 +1442,7 @@ technician to verify it against the current OEM manual.""",
                             f"Engine model: {case['engine_model']}\n"
                             f"Serial: {case['serial'] or 'not provided'}\n"
                             f"EXACT DEFECT/ALARM: {case['defect']}\n\n"
-                            f"Manual evidence already reviewed:\n"
-                            f"{context or '[No sufficiently relevant manual evidence]'}"
+                            "SEARCH TARGET: Search ONLY for reliable technical information directly related to the exact manufacturer, engine model, and defect/alarm above. Do not use the manual excerpts as the web-search query."
                         ),
                     )
 
@@ -1454,12 +1453,24 @@ technician to verify it against the current OEM manual.""",
                     raise RuntimeError("No relevant online troubleshooting response was returned.")
 
             except Exception as exc:
+                error_text = safe_text(exc) or "Unknown online research error"
                 st.session_state.troubleshooting_web_answer = None
-                st.session_state.troubleshooting_web_error = safe_text(exc)
+                st.session_state.troubleshooting_web_error = error_text
+
                 st.error(
-                    "Online technical research could not be completed. "
-                    "You can retry the online search."
+                    "Online technical research could not be completed."
                 )
+                with st.expander("Show online-search error details"):
+                    st.code(error_text)
+
+                if st.button(
+                    "Retry Online Search",
+                    key="retry_troubleshoot_web",
+                    type="primary",
+                ):
+                    st.session_state.troubleshooting_web_choice = "yes"
+                    st.session_state.troubleshooting_web_error = None
+                    st.rerun()
                 return
 
     web_answer = st.session_state.get(
