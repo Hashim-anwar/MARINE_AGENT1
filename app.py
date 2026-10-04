@@ -368,8 +368,8 @@ def make_troubleshooting_pdf(case: dict[str, Any], manual_answer: str | None, so
     doc=SimpleDocTemplate(out, pagesize=A4, rightMargin=18*mm, leftMargin=18*mm, topMargin=18*mm, bottomMargin=18*mm, title="MarineWise AI Troubleshooting", author="MarineWise AI")
     title=ParagraphStyle("t_title",fontName=font,fontSize=20,leading=24,alignment=TA_CENTER,textColor=colors.HexColor("#17324D"),spaceAfter=8)
     meta=ParagraphStyle("t_meta",fontName=font,fontSize=14,leading=20,alignment=TA_CENTER,textColor=colors.HexColor("#344054"),spaceAfter=12)
-    body=ParagraphStyle("t_body",fontName=font,fontSize=14,leading=20,alignment=TA_JUSTIFY,textColor=colors.HexColor("#17202A"),spaceAfter=8,allowWidows=0,allowOrphans=0)
-    step=ParagraphStyle("t_step",fontName=font,fontSize=14,leading=20,alignment=TA_JUSTIFY,textColor=colors.HexColor("#17202A"),leftIndent=7*mm,firstLineIndent=-7*mm,spaceAfter=10,allowWidows=0,allowOrphans=0)
+    body=ParagraphStyle("t_body",fontName=font,fontSize=12,leading=17,alignment=TA_JUSTIFY,textColor=colors.HexColor("#17202A"),spaceAfter=8,allowWidows=0,allowOrphans=0)
+    step=ParagraphStyle("t_step",fontName=font,fontSize=12,leading=17,alignment=TA_JUSTIFY,textColor=colors.HexColor("#17202A"),leftIndent=7*mm,firstLineIndent=-7*mm,spaceAfter=9,allowWidows=0,allowOrphans=0)
     head=ParagraphStyle("t_head",fontName=font,fontSize=17,leading=21,alignment=TA_LEFT,textColor=colors.HexColor("#17324D"),spaceBefore=10,spaceAfter=7)
     small=ParagraphStyle("t_small",fontName=font,fontSize=11,leading=16,alignment=TA_LEFT,textColor=colors.HexColor("#475467"),spaceAfter=5)
     esc=lambda x: safe_paragraph(clean_output_text(x))
@@ -415,7 +415,7 @@ def make_command_center_pdf(result: dict[str, Any]) -> bytes:
     doc=SimpleDocTemplate(out,pagesize=A4,rightMargin=18*mm,leftMargin=18*mm,topMargin=18*mm,bottomMargin=18*mm,title="MarineWise AI Command Center Result",author="MarineWise AI")
     title=ParagraphStyle("cc_title",fontName=font,fontSize=20,leading=24,alignment=TA_CENTER,textColor=colors.HexColor("#17324D"),spaceAfter=10)
     head=ParagraphStyle("cc_head",fontName=font,fontSize=17,leading=21,alignment=TA_LEFT,textColor=colors.HexColor("#17324D"),spaceBefore=10,spaceAfter=7)
-    body=ParagraphStyle("cc_body",fontName=font,fontSize=14,leading=20,alignment=TA_JUSTIFY,textColor=colors.HexColor("#17202A"),spaceAfter=8)
+    body=ParagraphStyle("cc_body",fontName=font,fontSize=12,leading=17,alignment=TA_JUSTIFY,textColor=colors.HexColor("#17202A"),spaceAfter=8)
     small=ParagraphStyle("cc_small",fontName=font,fontSize=11,leading=16,alignment=TA_LEFT,textColor=colors.HexColor("#475467"),spaceAfter=5)
     esc=lambda x:safe_paragraph(clean_output_text(x))
     topic=clean_output_text(result.get("topic")) or "Marine Technical Case"
@@ -988,8 +988,31 @@ def troubleshooting_page() -> None:
     final_answer=combined or answer
     if final_answer:
         try:
-            pdf=make_troubleshooting_pdf(case, final_answer, relevant, None, [])
-            st.download_button("Download Troubleshooting PDF",data=pdf,file_name="MarineWise_Troubleshooting.pdf",mime="application/pdf",type="primary",key="download_troubleshooting_pdf")
+            troubleshooting_web_sources = []
+            if web_answer:
+                for url in re.findall(r"https?://[^\\s)\\]}>]+", clean_output_text(web_answer)):
+                    troubleshooting_web_sources.append(
+                        {
+                            "title": "Approved online technical source",
+                            "url": url.rstrip(".,;"),
+                        }
+                    )
+
+            pdf=make_troubleshooting_pdf(
+                case,
+                final_answer,
+                relevant,
+                None,
+                troubleshooting_web_sources,
+            )
+            st.download_button(
+                "Download Troubleshooting PDF",
+                data=pdf,
+                file_name="MarineWise_Troubleshooting.pdf",
+                mime="application/pdf",
+                type="primary",
+                key="download_troubleshooting_pdf",
+            )
         except Exception as exc:
             st.error(f"Could not create the troubleshooting PDF: {exc}")
 
@@ -3214,6 +3237,7 @@ Keep the material practical and understandable.
                 content,
                 relevant,
                 diagram,
+                web_sources,
             ),
             "marinewise_training.pdf",
             "application/pdf",
@@ -3245,12 +3269,10 @@ Keep the material practical and understandable.
 
 
 def quiz_page() -> None:
-    st.subheader(
-        "2B. Quiz Generator"
-    )
-
+    st.subheader("2B. Technical Assessment / Quiz")
     st.caption(
-        "Generate technician questions and an answer key."
+        "Generate technically relevant technician questions using the supplied manuals first, "
+        "then reliable online research where available, followed by a verification pass."
     )
 
     with st.form("quiz_form"):
@@ -3261,11 +3283,7 @@ def quiz_page() -> None:
 
         qtype = st.selectbox(
             "Type",
-            [
-                "MCQ",
-                "Short Question",
-                "True-False",
-            ],
+            ["MCQ", "Short Question", "True-False"],
         )
 
         count = st.number_input(
@@ -3277,88 +3295,208 @@ def quiz_page() -> None:
         )
 
         submitted = st.form_submit_button(
-            "Generate Quiz",
+            "Generate Technical Assessment / Quiz",
             type="primary",
         )
 
     if not submitted:
         return
 
-    if not topic.strip():
+    topic = topic.strip()
+
+    if not topic:
         st.warning("Enter a topic.")
         return
 
-    rag = st.session_state.get(
-        "rag"
-    )
-
+    rag = st.session_state.get("rag")
     context = ""
     relevant: list[dict[str, Any]] = []
 
+    # --------------------------------------------------------
+    # 1. MANUAL-FIRST RETRIEVAL
+    # --------------------------------------------------------
     if rag:
-        with st.spinner(
-            "Searching manuals first..."
-        ):
+        with st.spinner("Searching supplied manuals first..."):
             results = search_index(
                 rag,
                 topic,
                 get_embedder(),
-                k=6,
+                k=8,
             )
 
             context, relevant = retrieve_context(
                 results,
                 min_score=0.30,
-                max_chunks=3,
-                max_chars=4000,
+                max_chunks=5,
+                max_chars=6000,
             )
 
-    with st.spinner(
-        "Generating quiz and answer key..."
-    ):
-        quiz_text = run_agent(
+    # --------------------------------------------------------
+    # 2. SUPPLEMENTARY ONLINE TECHNICAL RESEARCH
+    # --------------------------------------------------------
+    research: dict[str, Any] = {
+        "results": [],
+        "images": [],
+    }
+
+    tavily_key = get_secret("TAVILY_API_KEY")
+
+    if tavily_key and run_training_web_research is not None:
+        with st.spinner("Researching the quiz topic from reliable technical sources..."):
+            try:
+                research = run_training_web_research(
+                    selected_provider(),
+                    "Marine engine / marine technical equipment",
+                    topic,
+                    "",
+                    context,
+                    tavily_key,
+                ) or research
+            except Exception as exc:
+                st.warning(
+                    "Online research could not be completed. "
+                    "The quiz will continue using the supplied manuals."
+                )
+                st.caption(f"Online research note: {safe_text(exc)}")
+
+    web_sources = research.get("results", []) or []
+
+    # Keep only useful source information in the prompt.
+    web_evidence = []
+    for item in web_sources[:10]:
+        if isinstance(item, dict):
+            title = safe_text(item.get("title"))
+            url = safe_text(item.get("url"))
+            content = safe_text(item.get("content"))
+            if title or content:
+                web_evidence.append(
+                    f"TITLE: {title}\nURL: {url}\nCONTENT: {content[:1800]}"
+                )
+
+    web_context = "\n\n---\n\n".join(web_evidence)
+
+    # --------------------------------------------------------
+    # 3. GENERATE THE FIRST QUIZ DRAFT
+    # --------------------------------------------------------
+    with st.spinner("Generating technically relevant questions and answer key..."):
+        quiz_draft = run_agent(
             """
-Create a marine technician training quiz.
+You are a senior marine technical training instructor.
 
-Follow the requested question type and count exactly.
+Create a technically relevant assessment/quiz about the EXACT requested topic.
 
-Include an ANSWER KEY at the end.
+STRICT REQUIREMENTS:
+- Follow the requested question type and question count exactly.
+- Every question must test knowledge directly related to the requested topic.
+- Do NOT ask questions about PDF page numbers, document titles, source locations,
+  or incidental information merely because it appeared in a retrieved document.
+- Use the supplied OEM/manual excerpts as the PRIMARY technical source.
+- Use reliable online technical research only as SECONDARY supporting evidence.
+- Never invent manufacturer-specific specifications, limits, clearances, pressures,
+  temperatures, procedures, or component details.
+- If a manufacturer-specific value is not supported, ask a conceptual question instead.
+- For MCQ, provide exactly four options A-D and one unambiguous correct answer.
+- For Short Question, provide a concise model answer.
+- For True-False, provide an unambiguous statement and answer.
+- Finish with an ANSWER KEY.
+- The answer key must be easy to parse in this format:
+  1=A, 2=C, 3=D
+- Do not include unrelated questions.
 
-Use supplied manual excerpts where available.
-
-Do not invent manufacturer-specific values.
+The assessment will be independently checked before it is delivered.
 """,
             (
-                f"Topic: {topic}\n"
-                f"Type: {qtype}\n"
-                f"Questions: {count}\n\n"
-                f"MANUAL EXCERPTS:\n{context}"
+                f"REQUESTED TOPIC:\n{topic}\n\n"
+                f"QUESTION TYPE:\n{qtype}\n\n"
+                f"QUESTION COUNT:\n{int(count)}\n\n"
+                f"PRIMARY OEM / MANUAL EXCERPTS:\n"
+                f"{context or '[No sufficiently relevant manual excerpts were retrieved.]'}\n\n"
+                f"SECONDARY ONLINE TECHNICAL RESEARCH:\n"
+                f"{web_context or '[No online research available.]'}"
             ),
             "training",
         )
 
-    st.markdown(
-        "### Quiz"
-    )
+    # --------------------------------------------------------
+    # 4. VERIFICATION / QUALITY-CONTROL PASS
+    # --------------------------------------------------------
+    with st.spinner("Verifying question relevance, count, options, and answer key..."):
+        quiz_text = run_agent(
+            """
+You are the final quality-control reviewer for a marine technician assessment.
 
-    st.write(
-        quiz_text
-    )
+Review the DRAFT assessment against the requested topic, type, and count.
+
+Return a corrected final assessment, not a review report.
+
+CHECK EVERY QUESTION:
+1. Is it directly related to the requested topic?
+2. Is it technically meaningful for a marine technician?
+3. Does it avoid irrelevant document/page trivia?
+4. Does it avoid unsupported manufacturer-specific facts?
+5. Does the number of questions exactly match the requested count?
+6. For MCQ, are there exactly four options A-D and only one clearly correct answer?
+7. For Short Question, is the model answer technically defensible?
+8. For True-False, is the statement unambiguous?
+9. Does the answer key match the final questions exactly?
+
+SOURCE PRIORITY:
+- OEM/manual evidence first.
+- Reliable web evidence second.
+- Do not invent unsupported details.
+
+FINAL FORMAT:
+- Keep the requested question type.
+- Number every question sequentially.
+- Put each question on its own clearly separated line/paragraph.
+- End with:
+  ANSWER KEY
+  1=A, 2=C, 3=D
+
+Do not include a QC explanation.
+""",
+            (
+                f"REQUESTED TOPIC:\n{topic}\n\n"
+                f"QUESTION TYPE:\n{qtype}\n\n"
+                f"REQUIRED QUESTION COUNT:\n{int(count)}\n\n"
+                f"MANUAL EVIDENCE:\n{context or '[None]'}\n\n"
+                f"ONLINE EVIDENCE:\n{web_context or '[None]'}\n\n"
+                f"DRAFT ASSESSMENT:\n{quiz_draft}"
+            ),
+            "training",
+        )
+
+    st.markdown("### Technical Assessment / Quiz")
+    st.write(quiz_text)
 
     st.download_button(
-        "Download Quiz PDF",
+        "⬇ Download Technical Assessment / Quiz PDF",
         make_quiz_pdf(
             topic,
             qtype,
             quiz_text,
+            relevant,
+            web_sources,
         ),
-        "marinewise_quiz.pdf",
+        "marinewise_technical_assessment_quiz.pdf",
         "application/pdf",
+        type="primary",
     )
 
-    render_sources(
-        relevant
-    )
+    render_sources(relevant)
+
+    if web_sources:
+        st.markdown("**Web research sources used:**")
+        for source in web_sources[:8]:
+            if not isinstance(source, dict):
+                continue
+            title = safe_text(source.get("title")) or "Technical web source"
+            url = safe_text(source.get("url"))
+            if url:
+                st.markdown(f"- [{title}]({url})")
+            else:
+                st.markdown(f"- {title}")
+
 
 
 # ============================================================
@@ -4651,6 +4789,7 @@ information when they differ or when the manual does not cover a point.
                 remedial_content,
                 relevant,
                 diagram,
+                web_sources,
             ),
             "marinewise_targeted_remedial_training.pdf",
             "application/pdf",
@@ -5436,86 +5575,199 @@ def make_training_pdf(
     content: str,
     sources: list[dict[str, Any]],
     diagram: bytes,
+    web_sources: list[dict[str, Any]] | None = None,
 ) -> bytes:
+    """Create a clean, professional A4 technical-training PDF."""
+
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet
-    from reportlab.lib.units import inch
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
     from reportlab.platypus import (
         Image as RLImage,
+        PageBreak,
         Paragraph,
         SimpleDocTemplate,
         Spacer,
     )
 
+    font = _register_reportlab_fonts()
     output = io.BytesIO()
 
     document = SimpleDocTemplate(
         output,
         pagesize=A4,
-        rightMargin=36,
-        leftMargin=36,
-        topMargin=36,
-        bottomMargin=36,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+        title="MarineWise AI - Technical Training",
+        author="MarineWise AI",
     )
 
-    styles = getSampleStyleSheet()
+    registered_fonts = __import__(
+        "reportlab.pdfbase.pdfmetrics",
+        fromlist=["pdfmetrics"],
+    ).getRegisteredFontNames()
+
+    bold_font = (
+        f"{font}-Bold"
+        if f"{font}-Bold" in registered_fonts
+        else font
+    )
+
+    title_style = ParagraphStyle(
+        "training_title",
+        fontName=bold_font,
+        fontSize=19,
+        leading=23,
+        alignment=TA_CENTER,
+        textColor=colors.black,
+        spaceAfter=10,
+    )
+
+    meta_style = ParagraphStyle(
+        "training_meta",
+        fontName=font,
+        fontSize=12,
+        leading=17,
+        alignment=TA_CENTER,
+        textColor=colors.black,
+        spaceAfter=12,
+    )
+
+    body_style = ParagraphStyle(
+        "training_body",
+        fontName=font,
+        fontSize=12,
+        leading=17,
+        alignment=TA_JUSTIFY,
+        textColor=colors.black,
+        spaceAfter=8,
+        allowWidows=0,
+        allowOrphans=0,
+    )
+
+    heading_style = ParagraphStyle(
+        "training_heading",
+        fontName=bold_font,
+        fontSize=15,
+        leading=19,
+        alignment=TA_LEFT,
+        textColor=colors.black,
+        spaceBefore=10,
+        spaceAfter=7,
+    )
+
+    source_style = ParagraphStyle(
+        "training_source",
+        fontName=font,
+        fontSize=10,
+        leading=14,
+        alignment=TA_LEFT,
+        textColor=colors.black,
+        spaceAfter=5,
+    )
 
     story = [
         Paragraph(
-            "MarineWise AI — Technical Training",
-            styles["Title"],
+            "MarineWise AI - Technical Training",
+            title_style,
         ),
         Paragraph(
             safe_paragraph(
-                f"Engine: {engine} | "
+                f"Engine: {engine or 'Not specified'} | "
                 f"Ship: {ship or 'Not specified'} | "
                 f"Topic: {topic}"
             ),
-            styles["Heading2"],
-        ),
-        Spacer(1, 10),
-        RLImage(
-            io.BytesIO(diagram),
-            width=6.8 * inch,
-            height=3.06 * inch,
+            meta_style,
         ),
     ]
 
-    for part in split_text(content):
-        story.extend(
-            [
-                Paragraph(
-                    safe_paragraph(part),
-                    styles["BodyText"],
-                ),
-                Spacer(1, 8),
-            ]
-        )
-
-    if sources:
-        story.append(
-            Paragraph(
-                "Manual Sources",
-                styles["Heading2"],
+    if diagram:
+        try:
+            story.extend(
+                [
+                    RLImage(
+                        io.BytesIO(diagram),
+                        width=174 * mm,
+                        height=78 * mm,
+                    ),
+                    Spacer(1, 10),
+                ]
             )
+        except Exception:
+            # A broken optional diagram must never prevent PDF generation.
+            pass
+
+    # Preserve readable sections rather than creating huge dense paragraphs.
+    for raw in clean_output_text(content).splitlines():
+        line = raw.strip()
+
+        if not line:
+            story.append(Spacer(1, 3))
+            continue
+
+        line = re.sub(r"^#{1,6}\s*", "", line)
+
+        numbered = re.match(
+            r"^(\d+)[.)]\s+(.*)$",
+            line,
         )
 
-        for source in sources:
+        if numbered:
             story.append(
                 Paragraph(
                     safe_paragraph(
-                        f"{source['source']} — "
-                        f"page {source['page']}"
+                        f"{numbered.group(1)}. {numbered.group(2)}"
                     ),
-                    styles["BodyText"],
+                    body_style,
+                )
+            )
+        elif (
+            len(line) <= 100
+            and line.endswith(":")
+        ):
+            story.append(
+                Paragraph(
+                    safe_paragraph(line[:-1]),
+                    heading_style,
+                )
+            )
+        else:
+            story.append(
+                Paragraph(
+                    safe_paragraph(line),
+                    body_style,
                 )
             )
 
-    document.build(
-        story
+    refs = _source_lines(
+        sources or [],
+        web_sources or [],
     )
 
+    if refs:
+        story.append(PageBreak())
+        story.append(
+            Paragraph(
+                "Sources & References",
+                heading_style,
+            )
+        )
+
+        for ref in refs:
+            story.append(
+                Paragraph(
+                    safe_paragraph(ref),
+                    source_style,
+                )
+            )
+
+    document.build(story)
     return output.getvalue()
+
 
 
 def make_training_docx(
@@ -5564,62 +5816,274 @@ def make_quiz_pdf(
     topic: str,
     qtype: str,
     text: str,
+    sources: list[dict[str, Any]] | None = None,
+    web_sources: list[dict[str, Any]] | None = None,
 ) -> bytes:
+    """Create a clean, professional Technical Assessment / Quiz PDF."""
+
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
     from reportlab.platypus import (
+        PageBreak,
         Paragraph,
         SimpleDocTemplate,
         Spacer,
     )
 
+    font = _register_reportlab_fonts()
     output = io.BytesIO()
 
     document = SimpleDocTemplate(
         output,
         pagesize=A4,
-        rightMargin=36,
-        leftMargin=36,
-        topMargin=36,
-        bottomMargin=36,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+        title="MarineWise AI - Technical Assessment / Quiz",
+        author="MarineWise AI",
     )
 
-    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "quiz_title",
+        fontName=font,
+        fontSize=19,
+        leading=23,
+        alignment=TA_CENTER,
+        textColor=colors.black,
+        spaceAfter=10,
+    )
+
+    topic_style = ParagraphStyle(
+        "quiz_topic",
+        fontName=f"{font}-Bold"
+        if f"{font}-Bold" in __import__("reportlab.pdfbase.pdfmetrics", fromlist=["pdfmetrics"]).getRegisteredFontNames()
+        else font,
+        fontSize=12,
+        leading=16,
+        alignment=TA_CENTER,
+        textColor=colors.black,
+        spaceAfter=12,
+    )
+
+    question_style = ParagraphStyle(
+        "quiz_question",
+        fontName=font,
+        fontSize=12,
+        leading=17,
+        alignment=TA_JUSTIFY,
+        textColor=colors.black,
+        spaceAfter=7,
+        allowWidows=0,
+        allowOrphans=0,
+    )
+
+    option_style = ParagraphStyle(
+        "quiz_option",
+        fontName=font,
+        fontSize=12,
+        leading=16,
+        alignment=TA_JUSTIFY,
+        textColor=colors.black,
+        leftIndent=7 * mm,
+        firstLineIndent=-5 * mm,
+        spaceAfter=5,
+        allowWidows=0,
+        allowOrphans=0,
+    )
+
+    answer_style = ParagraphStyle(
+        "quiz_answer",
+        fontName=font,
+        fontSize=12,
+        leading=17,
+        alignment=TA_LEFT,
+        textColor=colors.black,
+        spaceAfter=7,
+    )
+
+    source_style = ParagraphStyle(
+        "quiz_source",
+        fontName=font,
+        fontSize=10,
+        leading=14,
+        alignment=TA_LEFT,
+        textColor=colors.black,
+        spaceAfter=5,
+    )
+
+    bold_font = (
+        f"{font}-Bold"
+        if f"{font}-Bold"
+        in __import__(
+            "reportlab.pdfbase.pdfmetrics",
+            fromlist=["pdfmetrics"],
+        ).getRegisteredFontNames()
+        else font
+    )
 
     story = [
         Paragraph(
-            "MarineWise AI — Technician Quiz",
-            styles["Title"],
+            "MarineWise AI - Technical Assessment / Quiz",
+            title_style,
         ),
         Paragraph(
-            safe_paragraph(
-                f"Topic: {topic} | "
-                f"Type: {qtype}"
+            safe_paragraph(topic),
+            ParagraphStyle(
+                "quiz_topic_final",
+                parent=topic_style,
+                fontName=bold_font,
             ),
-            styles["Heading2"],
         ),
-        Spacer(1, 10),
+        Paragraph(
+            safe_paragraph(f"Question Type: {qtype}"),
+            question_style,
+        ),
+        Spacer(1, 5),
     ]
 
-    for part in split_text(
-        text,
-        1500,
-    ):
-        story.extend(
-            [
-                Paragraph(
-                    safe_paragraph(part),
-                    styles["BodyText"],
-                ),
-                Spacer(1, 8),
-            ]
-        )
+    # Normalize the AI output and split it into logical lines.
+    cleaned = clean_output_text(text)
 
-    document.build(
-        story
+    answer_key_match = re.search(
+        r"(?is)\bANSWER\s*KEY\b\s*:?\s*(.*)$",
+        cleaned,
     )
 
+    if answer_key_match:
+        question_text = cleaned[:answer_key_match.start()].strip()
+        answer_key_text = answer_key_match.group(1).strip()
+    else:
+        question_text = cleaned
+        answer_key_text = ""
+
+    # Render questions/options separately so every question begins cleanly.
+    for raw_line in question_text.splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            story.append(Spacer(1, 3))
+            continue
+
+        line = re.sub(r"^#{1,6}\s*", "", line)
+
+        question_match = re.match(
+            r"^(\d+)[.)]\s*(.*)$",
+            line,
+        )
+
+        option_match = re.match(
+            r"^([A-Da-d])[.)]\s*(.*)$",
+            line,
+        )
+
+        if question_match:
+            number = question_match.group(1)
+            question = question_match.group(2).strip()
+            story.append(
+                Paragraph(
+                    safe_paragraph(f"{number}. {question}"),
+                    question_style,
+                )
+            )
+        elif option_match:
+            letter = option_match.group(1).upper()
+            option = option_match.group(2).strip()
+            story.append(
+                Paragraph(
+                    safe_paragraph(f"{letter}. {option}"),
+                    option_style,
+                )
+            )
+        else:
+            story.append(
+                Paragraph(
+                    safe_paragraph(line),
+                    question_style,
+                )
+            )
+
+    # GUARANTEED: answer key starts on a completely new page.
+    story.append(PageBreak())
+
+    story.append(
+        Paragraph(
+            "Answer Key",
+            ParagraphStyle(
+                "answer_heading",
+                fontName=bold_font,
+                fontSize=16,
+                leading=20,
+                alignment=TA_LEFT,
+                textColor=colors.black,
+                spaceAfter=10,
+            ),
+        )
+    )
+
+    # Normalize answer key into the requested compact format.
+    normalized_pairs: list[str] = []
+
+    for number, letter in re.findall(
+        r"(\d+)\s*[\.\):\-]?\s*([A-Da-d])",
+        answer_key_text,
+    ):
+        normalized_pairs.append(
+            f"{number}={letter.upper()}"
+        )
+
+    if normalized_pairs:
+        answer_key_final = ", ".join(normalized_pairs)
+    else:
+        answer_key_final = clean_output_text(answer_key_text)
+
+    if not answer_key_final:
+        answer_key_final = "Answer key was not returned by the assessment generator."
+
+    story.append(
+        Paragraph(
+            safe_paragraph(answer_key_final),
+            answer_style,
+        )
+    )
+
+    # Sources are kept after the answer key so the answer-key page remains clean.
+    refs = _source_lines(
+        sources or [],
+        web_sources or [],
+    )
+
+    if refs:
+        story.append(PageBreak())
+        story.append(
+            Paragraph(
+                "Sources & References",
+                ParagraphStyle(
+                    "source_heading",
+                    fontName=bold_font,
+                    fontSize=15,
+                    leading=19,
+                    alignment=TA_LEFT,
+                    textColor=colors.black,
+                    spaceAfter=9,
+                ),
+            )
+        )
+
+        for ref in refs:
+            story.append(
+                Paragraph(
+                    safe_paragraph(ref),
+                    source_style,
+                )
+            )
+
+    document.build(story)
     return output.getvalue()
+
 
 
 def make_remedial_ppt(
