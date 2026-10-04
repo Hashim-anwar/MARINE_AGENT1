@@ -3496,8 +3496,72 @@ Do not include a QC explanation.
     # FINAL SAFETY CLEANUP: prevent Markdown markers from revealing the correct MCQ.
     quiz_text = clean_quiz_markdown(quiz_text)
 
+    # --------------------------------------------------------
+    # 5. ANSWER REASONS FOR LEARNING (APP ONLY)
+    # --------------------------------------------------------
+    # These explanations are deliberately NOT passed to make_quiz_pdf().
+    # Therefore the downloadable assessment remains a real test, while the
+    # Streamlit screen can teach the technician why each answer is correct.
+    answer_reasons = ""
+
+    with st.spinner("Preparing the technical reason for each answer..."):
+        try:
+            answer_reasons = run_agent(
+                """
+You are a senior marine technical instructor.
+
+For the FINAL assessment below, explain why the selected answer is correct.
+This explanation is for the technician inside the Streamlit app only; it will
+NOT be included in the downloadable PDF.
+
+RULES:
+- Give one concise technical reason for every question.
+- State the question number and correct answer letter.
+- Explain the technical principle or evidence that makes that answer correct.
+- Keep each explanation to 1-3 short sentences.
+- Use the supplied OEM/manual evidence as the primary source.
+- Use online technical evidence only as secondary support.
+- Do not invent manufacturer-specific specifications or values.
+- If the manual does not support a manufacturer-specific detail, keep the
+  explanation conceptual and technically defensible.
+- Do not change the answers in the assessment.
+- Do not add new questions.
+- Do not use **bold**, ***bold/italic***, or other special formatting.
+
+Return ONLY this format:
+1. Answer: D — Reason: ...
+2. Answer: B — Reason: ...
+3. Answer: A — Reason: ...
+""",
+                (
+                    f"REQUESTED TOPIC:\n{topic}\n\n"
+                    f"FINAL ASSESSMENT:\n{quiz_text}\n\n"
+                    f"PRIMARY OEM / MANUAL EVIDENCE:\n"
+                    f"{context or '[No sufficiently relevant manual evidence was retrieved.]'}\n\n"
+                    f"SECONDARY ONLINE TECHNICAL EVIDENCE:\n"
+                    f"{web_context or '[No online research available.]'}"
+                ),
+                "training",
+            )
+            answer_reasons = clean_quiz_markdown(answer_reasons)
+        except Exception as exc:
+            answer_reasons = ""
+            st.caption(
+                "Answer explanations could not be generated. The assessment and PDF are still available."
+            )
+            st.caption(f"Explanation note: {safe_text(exc)}")
+
     st.markdown("### Technical Assessment / Quiz")
     st.write(quiz_text)
+
+    # Display reasons in the app only. They are NOT included in the PDF.
+    if answer_reasons:
+        st.markdown("### Why These Answers Are Correct")
+        st.info(
+            "These technical explanations are shown for learning after the assessment is generated. "
+            "They are intentionally excluded from the downloadable PDF."
+        )
+        st.write(answer_reasons)
 
     st.download_button(
         "⬇ Download Technical Assessment / Quiz PDF",
