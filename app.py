@@ -3268,6 +3268,29 @@ Keep the material practical and understandable.
 # ============================================================
 
 
+
+def clean_quiz_markdown(text: Any) -> str:
+    """Remove Markdown emphasis/backticks that can accidentally reveal MCQ answers.
+
+    This is intentionally used only for quiz content so normal technical text
+    elsewhere in MarineWise AI is not changed.
+    """
+    value = clean_output_text(text)
+
+    # Remove common Markdown emphasis markers.
+    value = value.replace("**", "")
+    value = value.replace("__", "")
+    value = value.replace("```", "")
+    value = value.replace("`", "")
+    value = value.replace("~~", "")
+
+    # Remove single-asterisk/underscore emphasis when they wrap text.
+    value = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", value)
+    value = re.sub(r"(?<!_)_([^_\n]+)_(?!_)", r"\1", value)
+
+    return value.strip()
+
+
 def quiz_page() -> None:
     st.subheader("2B. Technical Assessment / Quiz")
     st.caption(
@@ -3396,6 +3419,9 @@ STRICT REQUIREMENTS:
   temperatures, procedures, or component details.
 - If a manufacturer-specific value is not supported, ask a conceptual question instead.
 - For MCQ, provide exactly four options A-D and one unambiguous correct answer.
+- For MCQ, NEVER use Markdown emphasis or special formatting in any question or option.
+- NEVER use **bold**, ***bold/italic***, *italic*, __underline__, backticks, or any other marker to highlight an option.
+- All four MCQ options must have identical plain-text formatting so the correct answer cannot be visually identified.
 - For Short Question, provide a concise model answer.
 - For True-False, provide an unambiguous statement and answer.
 - Finish with an ANSWER KEY.
@@ -3436,7 +3462,8 @@ CHECK EVERY QUESTION:
 4. Does it avoid unsupported manufacturer-specific facts?
 5. Does the number of questions exactly match the requested count?
 6. For MCQ, are there exactly four options A-D and only one clearly correct answer?
-7. For Short Question, is the model answer technically defensible?
+7. For MCQ, do all options use identical plain-text formatting with NO **, ***, *, _, backticks, or other answer-revealing markers? Remove any such markers before returning the final assessment.
+8. For Short Question, is the model answer technically defensible?
 8. For True-False, is the statement unambiguous?
 9. Does the answer key match the final questions exactly?
 
@@ -3465,6 +3492,9 @@ Do not include a QC explanation.
             ),
             "training",
         )
+
+    # FINAL SAFETY CLEANUP: prevent Markdown markers from revealing the correct MCQ.
+    quiz_text = clean_quiz_markdown(quiz_text)
 
     st.markdown("### Technical Assessment / Quiz")
     st.write(quiz_text)
@@ -5946,7 +5976,7 @@ def make_quiz_pdf(
     ]
 
     # Normalize the AI output and split it into logical lines.
-    cleaned = clean_output_text(text)
+    cleaned = clean_quiz_markdown(text)
 
     answer_key_match = re.search(
         r"(?is)\bANSWER\s*KEY\b\s*:?\s*(.*)$",
