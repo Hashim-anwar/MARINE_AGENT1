@@ -4698,22 +4698,27 @@ SOURCE PRIORITY:
 3. If a detail is not supported by the supplied manual or reliable web
    evidence, do not invent a manufacturer-specific value or procedure.
 
-For every missed area:
-- explain the concept clearly
-- explain why it matters to a marine technician
-- identify the relevant components/functions
-- explain the correct diagnostic or inspection logic where supported
-- identify common technician mistakes
-- provide corrective learning points
-- provide a short practice check
+For EVERY missed area, create a clearly separated training module. Start each module with an uppercase numbered heading exactly like:
+1. MISSED CONCEPT NAME
+2. NEXT MISSED CONCEPT NAME
+Use the actual missed concepts; do not invent extra modules. Then use this exact structure:
+1. Concept / system explanation
+2. Why it matters to the technician
+3. Relevant components, parameters, or functions
+4. Diagnostic / inspection logic, step by step, only where supported
+5. Common technician mistake
+6. Corrective learning point
+7. Short practice check
 
-Finish with:
-- a practical knowledge check
-- a final retest section directly related to the missed topics
+Use concise technical paragraphs and practical bullet points. Do not use Markdown tables; use simple headings and bullets because this content will be formatted into a professional PDF. Do not put the answer in bold or use special formatting that could create answer cues.
 
-Do not include unrelated systems or topics merely to make the package longer.
-Clearly distinguish manual-supported information from secondary web-supported
-information when they differ or when the manual does not cover a point.
+After all missed-area modules, finish with:
+- Key points to remember
+- Practical knowledge check covering the missed concepts
+- Final retest section directly related to the missed concepts
+
+Every missed area must be covered. Do not merge unrelated missed areas into one generic section. Do not include unrelated marine systems merely to make the package longer.
+Clearly distinguish manual-supported information from secondary web-supported information when they differ or when the manual does not cover a point.
 """,
                 (
                     f"ENGINE / MANUFACTURER:\n"
@@ -4871,18 +4876,15 @@ information when they differ or when the manual does not cover a point.
         download_columns = st.columns(3)
 
         download_columns[0].download_button(
-            "⬇ Download Remedial PDF",
-            make_training_pdf(
+            "⬇ Download Professional Remedial PDF",
+            make_remedial_training_pdf(
                 engine.strip()
                 or "Marine engine",
                 "",
-                (
-                    "Remedial Training — "
-                    f"{remedial_topic}"
-                ),
+                float(score["score"]),
+                missed_topics,
                 remedial_content,
                 relevant,
-                diagram,
                 web_sources,
             ),
             "marinewise_targeted_remedial_training.pdf",
@@ -5660,6 +5662,517 @@ Answer / Training / Presentation
 # ============================================================
 # PDF / WORD OUTPUTS
 # ============================================================
+
+
+
+def make_remedial_training_pdf(
+    engine: str,
+    ship: str,
+    score: float,
+    missed_topics: list[str],
+    content: str,
+    sources: list[dict[str, Any]] | None = None,
+    web_sources: list[dict[str, Any]] | None = None,
+) -> bytes:
+    """Create a structured, technician-focused remedial training PDF.
+
+    This function is intentionally separate from the normal Training PDF so
+    the existing 2A training output is not changed.  It converts the AI's
+    markdown-style remedial package into proper ReportLab headings, bullets,
+    tables, callouts and practice checks instead of printing raw Markdown.
+    """
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        KeepTogether,
+        LongTable,
+        PageBreak,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        TableStyle,
+    )
+
+    font = _register_reportlab_fonts()
+    registered_fonts = __import__(
+        "reportlab.pdfbase.pdfmetrics",
+        fromlist=["pdfmetrics"],
+    ).getRegisteredFontNames()
+    bold_font = (
+        f"{font}-Bold"
+        if f"{font}-Bold" in registered_fonts
+        else font
+    )
+
+    output = io.BytesIO()
+    document = SimpleDocTemplate(
+        output,
+        pagesize=A4,
+        rightMargin=17 * mm,
+        leftMargin=17 * mm,
+        topMargin=20 * mm,
+        bottomMargin=18 * mm,
+        title="MarineWise AI - Targeted Remedial Training",
+        author="MarineWise AI",
+    )
+
+    title_style = ParagraphStyle(
+        "rem_title",
+        fontName=bold_font,
+        fontSize=20,
+        leading=24,
+        alignment=TA_CENTER,
+        spaceAfter=8,
+    )
+    subtitle_style = ParagraphStyle(
+        "rem_subtitle",
+        fontName=font,
+        fontSize=12,
+        leading=17,
+        alignment=TA_CENTER,
+        spaceAfter=14,
+    )
+    cover_label = ParagraphStyle(
+        "rem_cover_label",
+        fontName=bold_font,
+        fontSize=12,
+        leading=16,
+        alignment=TA_LEFT,
+    )
+    body = ParagraphStyle(
+        "rem_body",
+        fontName=font,
+        fontSize=12,
+        leading=17,
+        alignment=TA_JUSTIFY,
+        spaceAfter=7,
+        allowWidows=0,
+        allowOrphans=0,
+    )
+    body_left = ParagraphStyle(
+        "rem_body_left",
+        parent=body,
+        alignment=TA_LEFT,
+    )
+    section = ParagraphStyle(
+        "rem_section",
+        fontName=bold_font,
+        fontSize=16,
+        leading=20,
+        alignment=TA_LEFT,
+        spaceBefore=8,
+        spaceAfter=8,
+    )
+    subheading = ParagraphStyle(
+        "rem_subheading",
+        fontName=bold_font,
+        fontSize=13,
+        leading=17,
+        alignment=TA_LEFT,
+        spaceBefore=7,
+        spaceAfter=5,
+    )
+    bullet = ParagraphStyle(
+        "rem_bullet",
+        parent=body,
+        leftIndent=13,
+        firstLineIndent=-7,
+        alignment=TA_LEFT,
+        spaceAfter=4,
+    )
+    option = ParagraphStyle(
+        "rem_option",
+        parent=body,
+        leftIndent=15,
+        firstLineIndent=-2,
+        alignment=TA_LEFT,
+        spaceAfter=3,
+    )
+    callout = ParagraphStyle(
+        "rem_callout",
+        parent=body,
+        leftIndent=10,
+        rightIndent=8,
+        alignment=TA_JUSTIFY,
+        spaceBefore=5,
+        spaceAfter=8,
+    )
+    table_header = ParagraphStyle(
+        "rem_table_header",
+        fontName=bold_font,
+        fontSize=11,
+        leading=14,
+        alignment=TA_LEFT,
+    )
+    table_body = ParagraphStyle(
+        "rem_table_body",
+        fontName=font,
+        fontSize=11,
+        leading=14,
+        alignment=TA_LEFT,
+    )
+    source = ParagraphStyle(
+        "rem_source",
+        fontName=font,
+        fontSize=10,
+        leading=14,
+        alignment=TA_LEFT,
+        spaceAfter=5,
+    )
+    small = ParagraphStyle(
+        "rem_small",
+        fontName=font,
+        fontSize=10,
+        leading=13,
+        alignment=TA_LEFT,
+    )
+
+    def esc(text: Any) -> str:
+        """Clean Markdown/HTML artifacts before ReportLab rendering."""
+        value = clean_output_text(text)
+        value = value.translate(str.maketrans({
+            "\u2011": "-",
+            "\u2010": "-",
+            "\u2012": "-",
+            "\u202f": " ",
+            "\u00ad": "",
+            "\u00b7": "-",
+            "\u2248": "~",
+        }))
+        value = re.sub(r"<br\s*/?>", " ", value, flags=re.I)
+        value = re.sub(r"\*\*\*(.*?)\*\*\*", r"\1", value)
+        value = re.sub(r"\*\*(.*?)\*\*", r"\1", value)
+        value = re.sub(r"__(.*?)__", r"\1", value)
+        value = re.sub(r"(?<!\*)\*(?!\s)(.*?)(?<!\s)\*(?!\*)", r"\1", value)
+        value = re.sub(r"`([^`]*)`", r"\1", value)
+        value = re.sub(r"~~(.*?)~~", r"\1", value)
+        value = value.replace("---", "")
+        value = re.sub(r"\s+", " ", value).strip()
+        return safe_paragraph(value)
+
+    def strip_md(text: Any) -> str:
+        value = clean_output_text(text)
+        value = value.translate(str.maketrans({
+            "\u2011": "-",
+            "\u2010": "-",
+            "\u2012": "-",
+            "\u202f": " ",
+            "\u00ad": "",
+            "\u00b7": "-",
+            "\u2248": "~",
+        }))
+        value = re.sub(r"<br\s*/?>", " ", value, flags=re.I)
+        value = re.sub(r"\*\*\*(.*?)\*\*\*", r"\1", value)
+        value = re.sub(r"\*\*(.*?)\*\*", r"\1", value)
+        value = re.sub(r"__(.*?)__", r"\1", value)
+        value = re.sub(r"(?<!\*)\*(?!\s)(.*?)(?<!\s)\*(?!\*)", r"\1", value)
+        value = re.sub(r"`([^`]*)`", r"\1", value)
+        value = re.sub(r"~~(.*?)~~", r"\1", value)
+        return value.strip()
+
+    def footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont(font, 9)
+        canvas.drawCentredString(
+            A4[0] / 2,
+            9 * mm,
+            f"MarineWise AI - Targeted Remedial Training | Page {doc.page}",
+        )
+        canvas.restoreState()
+
+    story: list[Any] = []
+
+    # --------------------------------------------------------
+    # PROFESSIONAL COVER / ASSESSMENT SUMMARY
+    # --------------------------------------------------------
+    story.append(Spacer(1, 18 * mm))
+    story.append(Paragraph("MARINEWISE AI", title_style))
+    story.append(Paragraph("TARGETED REMEDIAL TRAINING", title_style))
+    story.append(
+        Paragraph(
+            "Technician knowledge-gap recovery package based on the assessment result",
+            subtitle_style,
+        )
+    )
+
+    missed_clean = [strip_md(x) for x in (missed_topics or []) if strip_md(x)]
+    if not missed_clean:
+        missed_clean = ["Assessment topics requiring improvement"]
+
+    summary_data = [
+        [Paragraph("Technician Result", cover_label), Paragraph(f"{score:.0f}%", cover_label)],
+        [Paragraph("Engine / Manufacturer", cover_label), Paragraph(esc(engine or "Not specified"), body_left)],
+        [Paragraph("Ship", cover_label), Paragraph(esc(ship or "Not specified"), body_left)],
+        [Paragraph("Improvement Areas", cover_label), Paragraph(str(len(missed_clean)), body_left)],
+    ]
+    summary = LongTable(summary_data, colWidths=[62 * mm, 108 * mm], hAlign="CENTER")
+    summary.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.7, colors.black),
+        ("BACKGROUND", (0, 0), (0, -1), colors.whitesmoke),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.append(summary)
+    story.append(Spacer(1, 12))
+
+    story.append(Paragraph("Remediation Objective", section))
+    story.append(
+        Paragraph(
+            esc(
+                "This package focuses on the concepts linked to the technician's incorrect "
+                "or unanswered assessment responses. The purpose is to rebuild understanding, "
+                "connect the concepts to practical marine-engine work, and provide a final "
+                "knowledge check."
+            ),
+            body,
+        )
+    )
+
+    story.append(Paragraph("Technician Improvement Areas", section))
+    for topic_item in missed_clean:
+        story.append(Paragraph(esc(f"- {topic_item}"), bullet))
+
+    story.append(PageBreak())
+
+    # --------------------------------------------------------
+    # TARGETED LEARNING MAP
+    # --------------------------------------------------------
+    story.append(Paragraph("1. Targeted Learning Map", section))
+    map_rows = [[
+        Paragraph("No.", table_header),
+        Paragraph("Missed Concept / Area", table_header),
+        Paragraph("Training Focus", table_header),
+    ]]
+    for idx, topic_item in enumerate(missed_clean, 1):
+        map_rows.append([
+            Paragraph(str(idx), table_body),
+            Paragraph(esc(topic_item), table_body),
+            Paragraph(
+                esc("Understand the concept, identify relevant components or parameters, "
+                    "apply the supported diagnostic logic, and verify understanding."),
+                table_body,
+            ),
+        ])
+    learning_map = LongTable(
+        map_rows,
+        colWidths=[12 * mm, 65 * mm, 93 * mm],
+        repeatRows=1,
+        hAlign="LEFT",
+    )
+    learning_map.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(learning_map)
+    story.append(Spacer(1, 10))
+
+    story.append(Paragraph("2. Remedial Technical Lessons", section))
+
+    # --------------------------------------------------------
+    # PARSE THE AI CONTENT INTO REAL DOCUMENT ELEMENTS
+    # --------------------------------------------------------
+    raw_lines = clean_output_text(content).splitlines()
+    i = 0
+    section_number = 0
+    content_modules_started = False
+
+    while i < len(raw_lines):
+        raw = raw_lines[i].strip()
+        if not raw:
+            i += 1
+            continue
+
+        # The AI may include a cover/preamble that is already represented by
+        # the professional cover page above. Skip that duplicate metadata.
+        if not content_modules_started:
+            first_module = re.match(r"^1\.\s+(.+)$", raw)
+            if not first_module:
+                i += 1
+                continue
+
+        # Ignore Markdown separators.
+        if re.fullmatch(r"[-*_]{3,}", raw):
+            i += 1
+            continue
+
+        # Markdown tables -> proper ReportLab tables.
+        if raw.startswith("|") and "|" in raw[1:]:
+            table_lines = []
+            while i < len(raw_lines):
+                candidate = raw_lines[i].strip()
+                if not candidate.startswith("|"):
+                    break
+                if re.fullmatch(r"\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?", candidate):
+                    i += 1
+                    continue
+                table_lines.append(candidate)
+                i += 1
+
+            parsed_rows = []
+            for row in table_lines:
+                cells = [strip_md(cell.strip()) for cell in row.strip("|").split("|")]
+                if any(cells):
+                    parsed_rows.append(cells)
+
+            if parsed_rows:
+                width = max(len(r) for r in parsed_rows)
+                parsed_rows = [r + [""] * (width - len(r)) for r in parsed_rows]
+                data = []
+                for r_idx, row in enumerate(parsed_rows):
+                    style = table_header if r_idx == 0 else table_body
+                    data.append([Paragraph(esc(cell), style) for cell in row])
+                if width == 2:
+                    widths = [73 * mm, 97 * mm]
+                elif width == 3:
+                    widths = [18 * mm, 67 * mm, 85 * mm]
+                else:
+                    each = 170 * mm / width
+                    widths = [each] * width
+                tbl = LongTable(data, colWidths=widths, repeatRows=1, hAlign="LEFT")
+                tbl.setStyle(TableStyle([
+                    ("GRID", (0, 0), (-1, -1), 0.45, colors.black),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]))
+                story.append(tbl)
+                story.append(Spacer(1, 8))
+            continue
+
+        # Numbered module heading: "1. ..."
+        numbered = re.match(r"^(\d+)\.\s+(.+)$", raw)
+        if (
+            numbered
+            and len(numbered.group(2)) <= 150
+            and int(numbered.group(1)) == section_number + 1
+            and strip_md(numbered.group(2)).upper() == strip_md(numbered.group(2))
+        ):
+            section_number += 1
+            content_modules_started = True
+            story.append(Spacer(1, 4))
+            story.append(
+                Paragraph(
+                    esc(f"{numbered.group(1)}. {strip_md(numbered.group(2))}"),
+                    section,
+                )
+            )
+            i += 1
+            continue
+
+        # Explicit labelled sections such as Why it matters / Common mistake.
+        labelled = re.match(r"^\*{0,3}([^:*]{3,90})\*{0,3}\s*:\s*(.*)$", raw)
+        if labelled and labelled.group(1).strip().lower() in {
+            "why it matters",
+            "key components",
+            "diagnostic logic",
+            "common mistake",
+            "corrective learning point",
+            "practice check",
+            "learning objective",
+            "manual-supported fact",
+            "web-supported information",
+        }:
+            label = strip_md(labelled.group(1)).strip()
+            remainder = strip_md(labelled.group(2)).strip()
+            story.append(Paragraph(esc(label), subheading))
+            if remainder:
+                story.append(Paragraph(esc(remainder), body))
+            i += 1
+            continue
+
+        # Bold-only heading, optionally followed by text on the same line.
+        bold_label = re.match(r"^\*\*(.+?)\*\*\s*(.*)$", raw)
+        if bold_label and len(bold_label.group(1)) <= 100:
+            label = strip_md(bold_label.group(1)).strip().rstrip(":")
+            remainder = strip_md(bold_label.group(2)).strip()
+            story.append(Paragraph(esc(label), subheading))
+            if remainder:
+                story.append(Paragraph(esc(remainder), body))
+            i += 1
+            continue
+
+        # Practice questions and multiple-choice options.
+        question_match = re.match(r"^(?:\*Question:\*|Question:)\s*(.*)$", raw, re.I)
+        if question_match:
+            story.append(Paragraph(esc(strip_md(question_match.group(1))), body))
+            i += 1
+            continue
+
+        option_match = re.match(r"^([A-D])\.\s+(.*)$", strip_md(raw))
+        if option_match:
+            story.append(Paragraph(esc(f"{option_match.group(1)}. {option_match.group(2)}"), option))
+            i += 1
+            continue
+
+        # Numbered diagnostic steps such as "1. Read ECU fault codes".
+        step_match = re.match(r"^(\d+)\.\s+(.+)$", raw)
+        if step_match:
+            story.append(Paragraph(esc(f"Step {step_match.group(1)}: {strip_md(step_match.group(2))}"), bullet))
+            i += 1
+            continue
+
+        # Bullets and blockquotes.
+        bullet_match = re.match(r"^(?:[-*•]|>)\s+(.*)$", raw)
+        if bullet_match:
+            text_value = strip_md(bullet_match.group(1))
+            story.append(Paragraph(esc(f"- {text_value}"), bullet if not raw.startswith(">") else callout))
+            i += 1
+            continue
+
+        # Markdown heading.
+        heading_match = re.match(r"^#{1,6}\s+(.+)$", raw)
+        if heading_match:
+            story.append(Paragraph(esc(strip_md(heading_match.group(1))), section))
+            i += 1
+            continue
+
+        # Regular paragraph.
+        cleaned = strip_md(raw)
+        if cleaned:
+            story.append(Paragraph(esc(cleaned), body))
+        i += 1
+
+    # --------------------------------------------------------
+    # FINAL COMPLETION CHECKLIST
+    # --------------------------------------------------------
+    story.append(PageBreak())
+    story.append(Paragraph("3. Technician Completion Checklist", section))
+    checklist_items = [
+        "I can explain each missed concept without referring to the training notes.",
+        "I can identify the relevant component, parameter, or system function.",
+        "I can describe the supported inspection or diagnostic logic in the correct order.",
+        "I can explain the common mistake associated with the failed concept.",
+        "I can apply the concept to a practical marine-engine scenario.",
+        "I can complete the final retest without assistance.",
+    ]
+    for item in checklist_items:
+        story.append(Paragraph(esc(f"[ ] {item}"), bullet))
+
+    story.append(Spacer(1, 8))
+    story.append(Paragraph("4. Sources & References", section))
+    refs = _source_lines(sources or [], web_sources or [])
+    if refs:
+        for ref in refs:
+            story.append(Paragraph(esc(ref), source))
+    else:
+        story.append(Paragraph("No source references were available for this package.", source))
+
+    document.build(story, onFirstPage=footer, onLaterPages=footer)
+    return output.getvalue()
 
 
 def make_training_pdf(
